@@ -1,0 +1,40 @@
+[project]
+name = "deepvision"
+version = "0.1.0"
+description = "让文本模型看懂图:产出带坐标锚点的结构化视觉表示,消除 Reference Gap"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["vision", "multimodal", "llm", "ocr", "ui-parsing", "structured-output"]
+authors = [{ name = "Ksoyal" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.31",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/Ksoyal/deepvision"
+Repository = "https://github.com/Ksoyal/deepvision"
+
+[project.scripts]
+deepvision = "deepvision.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deepvision = ["prompts/*.md"]

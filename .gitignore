@@ -1,0 +1,23 @@
+# 密钥与本地配置(含真实 API key,绝不提交)
+.deepvision.json
+**/.deepvision.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# 临时/调试产物
+clipboard_input.png
+debug_*.png
+
+# 编辑器
+.vscode/
+.idea/
+.claude/
+CLAUDE.md
