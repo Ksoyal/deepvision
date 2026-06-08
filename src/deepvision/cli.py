@@ -2,9 +2,7 @@
 
 用法示例:
   deepvision image.png                      # 结构化解析,输出锚点文本
-  deepvision image.png -q "提交按钮在哪"     # 带问题
   deepvision image.png --json               # 输出原始结构化 JSON
-  deepvision image.png --flat               # 退回扁平描述(OpenVL 式)
   deepvision image.png --refine             # 对低置信区域自动局部细化
   cat img.png | deepvision -                 # 从 stdin 读取
 """
@@ -16,7 +14,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
-from .vision import describe, describe_structured
+from .vision import describe_structured
 from .refine import auto_refine
 from .verify import verify_scene
 
@@ -87,31 +85,54 @@ def cmd_init(argv) -> int:
     return 0
 
 
+def cmd_cache(argv) -> int:
+    """查看或清空响应缓存。
+
+      deepvision cache            # 显示缓存位置、条目数、占用大小
+      deepvision cache --clear    # 清空缓存
+    """
+    from .vision import cache_stats, cache_clear
+
+    ap = argparse.ArgumentParser(prog="deepvision cache", description="管理响应缓存")
+    ap.add_argument("--clear", action="store_true", help="清空全部缓存条目")
+    args = ap.parse_args(argv)
+
+    if args.clear:
+        removed = cache_clear()
+        print(f"已清空缓存,删除 {removed} 条")
+        return 0
+
+    s = cache_stats()
+    mb = s["bytes"] / (1024 * 1024)
+    print(f"缓存目录:{s['dir']}")
+    print(f"条目数:{s['entries']}")
+    print(f"占用:{mb:.2f} MB")
+    return 0
+
+
 def _process_one(image, args, cfg):
-    """处理单张图,返回 (锚点文本或 None, scene 或 None)。flat 模式只返回文本。"""
-    if args.flat:
-        return describe(image, args.question, cfg), None
-    scene = describe_structured(image, args.question, cfg)
+    """处理单张图,返回 scene。"""
+    scene = describe_structured(image, cfg)
     if args.verify:
         scene = verify_scene(image, scene, level=args.verify, cfg=cfg)
     if args.refine:
         scene = auto_refine(image, scene, cfg=cfg)
-    return None, scene
+    return scene
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "init":
         return cmd_init(argv[1:])
+    if argv and argv[0] == "cache":
+        return cmd_cache(argv[1:])
 
     ap = argparse.ArgumentParser(prog="deepvision", description="结构化视觉解析")
     ap.add_argument("image", nargs="*", default=None,
                     help="图片路径(可传多个批量处理),或 - 表示从 stdin 读取;用 -c 时可省略")
     ap.add_argument("-c", "--clipboard", action="store_true",
                     help="读取剪贴板里的图片")
-    ap.add_argument("-q", "--question", default="", help="附带的问题")
     ap.add_argument("--json", action="store_true", help="输出原始结构化 JSON")
-    ap.add_argument("--flat", action="store_true", help="退回扁平文本描述")
     ap.add_argument("--refine", action="store_true", help="低置信区域自动局部细化")
     ap.add_argument("--verify", nargs="?", const="suspicious", default=None,
                     choices=["suspicious", "full"],
@@ -120,10 +141,13 @@ def main(argv=None) -> int:
     ap.add_argument("-m", "--model", help="覆盖模型 id")
     ap.add_argument("-t", "--temperature", type=float, help="采样温度")
     ap.add_argument("-s", "--max-edge", type=int, dest="max_edge", help="长边像素上限")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="禁用响应缓存,强制重新请求(默认开启缓存,省额度)")
     args = ap.parse_args(argv)
 
     cfg = Config.load(model=args.model, temperature=args.temperature,
-                      max_edge=args.max_edge)
+                      max_edge=args.max_edge,
+                      cache=False if args.no_cache else None)
 
     # 收集待处理图片为 (来源标签, 图片) 列表
     items = []
@@ -138,17 +162,16 @@ def main(argv=None) -> int:
     failed = False
     for src, image in items:
         try:
-            text, scene = _process_one(image, args, cfg)
+            scene = _process_one(image, args, cfg)
             if args.json:
                 json_results.append({
                     "source": src,
-                    "scene": scene.to_dict() if scene is not None else None,
-                    "text": text,
+                    "scene": scene.to_dict(),
                 })
             else:
                 if len(items) > 1:
                     print(f"# === {src} ===")
-                print(text if text is not None else scene.to_anchored_text())
+                print(scene.to_anchored_text())
         except Exception as e:  # noqa: BLE001
             print(f"错误[{src}]: {e}", file=sys.stderr)
             failed = True

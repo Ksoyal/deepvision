@@ -67,8 +67,6 @@ rm -rf ~/.deepvision        # 删除配置(Windows: rmdir /s %USERPROFILE%\.deep
 ```bash
 deepvision 图.png                # 结构化解析,输出带坐标锚点的文本
 deepvision 图.png --json         # 输出原始结构化 JSON
-deepvision 图.png --flat         # 退回扁平描述(简单用法)
-deepvision 图.png -q "提交按钮在哪"   # 带具体问题
 deepvision -c                    # 解析剪贴板:位图截图,或复制的图片文件(多张则批量)
 cat 图.png | deepvision -         # 从 stdin 读取
 
@@ -79,7 +77,21 @@ deepvision *.png --json            # JSON 数组,每项含 source(来源)和 sce
 # 覆盖参数
 deepvision 图.png -m google/gemma-4-31b-it:free   # 临时换模型
 deepvision 图.png -t 0.2 -s 1280                   # 温度 / 长边像素上限
+deepvision 图.png --no-cache                       # 禁用缓存,强制重新请求
 ```
+
+### 响应缓存
+
+默认缓存模型响应到 `~/.deepvision/cache/`,同图同请求不重复调用 API,省额度也更快。缓存键由模型 + 提示词 + 图片内容决定。结构化解析是问题无关的客观全量表示,所以同一张图在相同模型、相同 prompt 下只会解析一次,后续直接复用。
+
+缓存目录不会无限增长:条目数超过 `cache_max_entries`(默认 1000,设 0 不限)时,按最近最少使用自动淘汰最旧的。也可手动管理:
+
+```bash
+deepvision cache            # 查看缓存位置、条目数、占用大小
+deepvision cache --clear    # 清空缓存
+```
+
+改了 prompt、换了模型,或想看模型的新输出时,加 `--no-cache` 强制重新请求。
 
 ### 核查力度
 
@@ -165,7 +177,7 @@ pip install -e ".[mcp]"
 python -m deepvision.mcp_server
 ```
 
-它暴露 `describe_image_structured` 和 `describe_image_flat` 两个工具。在工具的 MCP 配置里(如 Claude Desktop 的 `claude_desktop_config.json`)添加:
+它暴露 `describe_image_structured` 工具。在工具的 MCP 配置里(如 Claude Desktop 的 `claude_desktop_config.json`)添加:
 
 ```json
 {

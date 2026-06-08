@@ -7,14 +7,13 @@
 
 from .config import Config
 from .schema import Scene, Primitive, Relation
-from .vision import describe, describe_structured
+from .vision import describe_structured
 
 __all__ = [
     "Config",
     "Scene",
     "Primitive",
     "Relation",
-    "describe",
     "describe_structured",
 ]
 

@@ -1,15 +1,16 @@
 """核心视觉解析:图像 -> 结构化 Scene。
 
-提供两个层次的接口:
-- describe():           返回扁平文本描述(兼容 OpenVL 的简单用法)
-- describe_structured(): 返回带坐标锚点的 Scene(本项目的核心价值)
+describe_structured() 把图片解析成带坐标锚点的 Scene(本项目的核心价值):
+每个元素带稳定 id、归一化坐标与空间关系,供下游文本模型精确引用。
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -23,6 +24,83 @@ from .schema import Scene
 
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
+_CACHE_DIR = Path.home() / ".deepvision" / "cache"
+
+
+def _cache_key(model: str, prompt: str, data_uri: str, question: str) -> str:
+    """API 响应的缓存键:模型 + 提示 + 图片 + 问题的内容哈希。"""
+    h = hashlib.sha256()
+    for part in (model, prompt, question, data_uri):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def _cache_get(key: str) -> Optional[str]:
+    f = _CACHE_DIR / f"{key}.txt"
+    if f.is_file():
+        try:
+            value = f.read_text(encoding="utf-8")
+            f.touch()  # 更新访问时间,LRU 保活:常用条目不被淘汰
+            return value
+        except OSError:
+            return None
+    return None
+
+
+def _evict_if_needed(max_entries: int) -> None:
+    """按最近最少使用(mtime)淘汰超出上限的缓存条目。max_entries<=0 表示不限。"""
+    if max_entries <= 0:
+        return
+    try:
+        files = list(_CACHE_DIR.glob("*.txt"))
+        if len(files) <= max_entries:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime)  # 最旧的在前
+        for p in files[: len(files) - max_entries]:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass  # 回收失败不影响主流程
+
+
+def _cache_put(key: str, value: str, max_entries: int = 0) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # 原子写:先写临时文件再替换,避免并发/中断留下半截文件
+        tmp = _CACHE_DIR / f"{key}.tmp"
+        tmp.write_text(value, encoding="utf-8")
+        os.replace(tmp, _CACHE_DIR / f"{key}.txt")
+    except OSError:
+        return  # 缓存写失败不影响主流程
+    _evict_if_needed(max_entries)
+
+
+def cache_stats() -> dict:
+    """返回缓存目录的位置、条目数、总字节数。"""
+    entries, total = 0, 0
+    try:
+        for p in _CACHE_DIR.glob("*.txt"):
+            entries += 1
+            total += p.stat().st_size
+    except OSError:
+        pass
+    return {"dir": str(_CACHE_DIR), "entries": entries, "bytes": total}
+
+
+def cache_clear() -> int:
+    """清空缓存目录,返回删除的条目数。"""
+    removed = 0
+    try:
+        for p in _CACHE_DIR.glob("*.txt"):
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed
+
 
 
 def _normalize_coords(scene: Scene) -> Scene:
@@ -103,6 +181,12 @@ def _call_api(cfg: Config, prompt: str, data_uri: str, question: str = "") -> st
     前缀缓存命中(同一张图配不同问题时复用前缀)。
     """
     cfg.require_key()
+    if getattr(cfg, "cache", False):
+        key = _cache_key(cfg.model, prompt, data_uri, question)
+        hit = _cache_get(key)
+        if hit is not None:
+            return hit
+
     user_content = []
     if question:
         user_content.append({"type": "text", "text": question})
@@ -132,40 +216,96 @@ def _call_api(cfg: Config, prompt: str, data_uri: str, question: str = "") -> st
             last_exc = requests.HTTPError(f"429 (第 {attempt + 1} 次,退避 {wait}s)")
             continue
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        content = resp.json()["choices"][0]["message"]["content"]
+        if getattr(cfg, "cache", False):
+            _cache_put(_cache_key(cfg.model, prompt, data_uri, question), content,
+                       getattr(cfg, "cache_max_entries", 0))
+        return content
     raise last_exc or RuntimeError("API 调用失败")
 
 
+def _strip_fences(text: str) -> str:
+    """去掉 ```json ... ``` 围栏,返回栏内内容(无围栏则原样返回)。"""
+    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
+    return fence.group(1).strip() if fence else text
+
+
+def _balanced_json(text: str) -> Optional[str]:
+    """从首个 '{' 起按括号深度扫描出第一段平衡的 JSON 对象。
+
+    比 find('{') + rfind('}') 稳健:能跳过字符串内的括号与转义,
+    也不会被 JSON 之后夹带的解释文字干扰。
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _extract_json(text: str) -> dict:
-    """从模型输出里稳健地抠出 JSON(容忍 ```json 包裹或前后赘述)。"""
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    else:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            text = text[start : end + 1]
-    return json.loads(text)
+    """从模型输出里稳健地抠出 JSON。
+
+    依次尝试:直接解析 -> 去围栏后解析 -> 平衡括号截取后解析 ->
+    去尾随逗号后解析。覆盖免费模型常见的格式瑕疵(围栏、赘述、尾逗号)。
+    """
+    candidates = []
+    stripped = _strip_fences(text.strip())
+    candidates.append(stripped)
+    balanced = _balanced_json(stripped)
+    if balanced:
+        candidates.append(balanced)
+
+    last_err: Optional[Exception] = None
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError as e:
+            last_err = e
+            # 容错:去掉对象/数组里的尾随逗号 ( ,} 或 ,] ) 再试一次
+            fixed = re.sub(r",(\s*[}\]])", r"\1", cand)
+            if fixed != cand:
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError as e2:
+                    last_err = e2
+    raise ValueError(f"无法从模型输出解析出 JSON:{last_err}")
 
 
-def describe(image: Union[str, Path, bytes], question: str = "",
-             cfg: Optional[Config] = None) -> str:
-    """扁平文本描述(兼容 OpenVL 式简单用法)。"""
-    cfg = cfg or Config.load()
-    data_uri, _, _ = _to_data_uri(image, cfg.max_edge)
-    prompt = _load_prompt("describe.md")
-    return _call_api(cfg, prompt, data_uri, question)
 
-
-def describe_structured(image: Union[str, Path, bytes], question: str = "",
+def describe_structured(image: Union[str, Path, bytes],
                         cfg: Optional[Config] = None) -> Scene:
-    """核心接口:返回带坐标锚点的结构化 Scene。"""
+    """核心接口:把图片解析成带坐标锚点的结构化 Scene。
+
+    产出的是客观全量解析:同一张图无论下游想问什么,都引用这同一份
+    结构化表示(回答交给下游文本模型)。因此不向视觉模型传任何问题——
+    既保证解析不被问题带偏,也让缓存能跨问题复用(同图同模型同 prompt
+    即命中)。
+    """
     cfg = cfg or Config.load()
     data_uri, w, h = _to_data_uri(image, cfg.max_edge)
     prompt = _load_prompt("structured.md")
-    raw = _call_api(cfg, prompt, data_uri, question)
+    raw = _call_api(cfg, prompt, data_uri)
     data = _extract_json(raw)
     scene = Scene.from_dict(data)
     scene.width, scene.height = w, h

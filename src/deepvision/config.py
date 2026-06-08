@@ -28,6 +28,8 @@ class Config:
     max_edge: int = 1024  # 长边缩放上限,控制 token 成本
     timeout: int = 120
     max_retries: int = 4  # 429 限流时的指数退避重试次数
+    cache: bool = True  # 缓存 API 响应,同图同请求不重复调用(省额度)
+    cache_max_entries: int = 1000  # 缓存条目上限,超出按最近最少使用淘汰;0 表示不限
 
     @classmethod
     def load(cls, **overrides) -> "Config":
