@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from deepvision.schema import (
-    Scene, Primitive, Relation,
+    Scene, Primitive, Composite, Relation,
     derive_geometric_relations, sort_reading_order,
 )
 from deepvision import cli
@@ -62,11 +62,59 @@ def test_roundtrip_json():
     assert restored.relations[0].rel == "above"
 
 
+def test_roundtrip_composites_and_parent_links():
+    s = Scene(
+        summary="两道题",
+        primitives=[
+            Primitive(id="num_10", type="bbox", label="题号",
+                      box=(0.02, 0.1, 0.08, 0.2), text="10、",
+                      role="problem_number", parent="problem_10"),
+            Primitive(id="expr_10", type="bbox", label="极限表达式",
+                      box=(0.25, 0.1, 0.75, 0.3), parent="problem_10"),
+        ],
+        composites=[
+            Composite(id="problem_10", type="composite", label="第10题",
+                      role="problem", box=(0.02, 0.08, 0.75, 0.32),
+                      text="求数列的极限 lim_{n→∞} ...",
+                      children=["num_10", "expr_10"]),
+        ],
+    )
+
+    restored = Scene.from_dict(s.to_dict())
+
+    assert restored.by_id("problem_10").role == "problem"
+    assert restored.by_id("num_10").parent == "problem_10"
+    assert restored.composites[0].children == ["num_10", "expr_10"]
+
+
 def test_anchored_text_has_ids_and_coords():
     text = _sample_scene().to_anchored_text()
     assert "[input_email]" in text
     assert "bbox=(0.100,0.400,0.600,0.460)" in text
     assert "input_email --above--> btn_submit" in text
+
+
+def test_anchored_text_lists_composites_before_primitives():
+    s = Scene(
+        summary="表单",
+        primitives=[
+            Primitive(id="email_input", type="bbox", label="邮箱输入框",
+                      box=(0.1, 0.4, 0.6, 0.5), parent="login_form"),
+        ],
+        composites=[
+            Composite(id="login_form", type="composite", label="登录表单",
+                      role="form", box=(0.05, 0.2, 0.7, 0.8),
+                      text="邮箱、密码和提交按钮",
+                      children=["email_input"]),
+        ],
+    )
+
+    text = s.to_anchored_text()
+
+    assert "# 语义单元" in text
+    assert "[login_form] 登录表单 role=form" in text
+    assert 'children=[email_input]' in text
+    assert text.index("[login_form]") < text.index("[email_input]")
 
 
 def test_by_id_missing_returns_none():
@@ -138,6 +186,22 @@ def test_normalize_small_pixel_bbox_uses_image_size():
         relations=[], width=800, height=600)
     vision._normalize_coords(s)
     assert _approx(s.by_id("a").box[:2], (100 / 800, 200 / 600))
+
+
+def test_normalize_composite_bbox_uses_image_size():
+    s = Scene(
+        summary="t",
+        composites=[
+            Composite(id="problem_10", type="composite", label="第10题",
+                      box=(20, 40, 700, 320)),
+        ],
+        width=800,
+        height=600,
+    )
+
+    vision._normalize_coords(s)
+
+    assert _approx(s.by_id("problem_10").box[:2], (20 / 800, 40 / 600))
 
 
 # ---- vision: 缓存 + 端到端解析(打桩 HTTP,全程离线)----------------------
@@ -462,6 +526,27 @@ def test_derive_above_requires_horizontal_overlap():
     rels = _rels_set(derive_geometric_relations(prims))
     assert ("top", "above", "bottom") in rels
     assert ("top", "above", "side") not in rels  # 水平不重叠
+
+
+def test_derive_geometric_relations_do_not_cross_parents():
+    """不同父容器的元素不应产生跨块几何关系。"""
+    prims = [
+        Primitive(id="num_10", type="bbox", label="10", parent="problem_10",
+                  box=(0.0, 0.1, 0.1, 0.2)),
+        Primitive(id="expr_10", type="bbox", label="表达式10", parent="problem_10",
+                  box=(0.2, 0.1, 0.4, 0.2)),
+        Primitive(id="num_11", type="bbox", label="11", parent="problem_11",
+                  box=(0.0, 0.5, 0.1, 0.6)),
+        Primitive(id="expr_11", type="bbox", label="表达式11", parent="problem_11",
+                  box=(0.2, 0.5, 0.4, 0.6)),
+    ]
+
+    rels = _rels_set(derive_geometric_relations(prims))
+
+    assert ("num_10", "left_of", "expr_10") in rels
+    assert ("num_11", "left_of", "expr_11") in rels
+    assert ("num_10", "above", "num_11") not in rels
+    assert ("expr_10", "above", "expr_11") not in rels
 
 
 def test_derive_point_not_a_container():

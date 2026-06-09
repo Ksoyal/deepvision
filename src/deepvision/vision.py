@@ -114,11 +114,12 @@ def _normalize_coords(scene: Scene) -> Scene:
       - 真实像素:      除以图片宽高
     用"出现过的最大坐标值"来判定标度,避免逐元素误判。
     """
+    elements = [*scene.primitives, *scene.composites]
     vals = []
-    for p in scene.primitives:
-        if p.box:
+    for p in elements:
+        if getattr(p, "box", None):
             vals.extend(p.box)
-        if p.point:
+        if getattr(p, "point", None):
             vals.extend(p.point)
     if not vals:
         return scene
@@ -129,12 +130,12 @@ def _normalize_coords(scene: Scene) -> Scene:
     def _fits_image_pixels() -> bool:
         if not scene.width or not scene.height:
             return False
-        for p in scene.primitives:
-            if p.box:
+        for p in elements:
+            if getattr(p, "box", None):
                 x0, y0, x1, y1 = p.box
                 if max(x0, x1) > scene.width or max(y0, y1) > scene.height:
                     return False
-            if p.point:
+            if getattr(p, "point", None):
                 x, y = p.point
                 if x > scene.width or y > scene.height:
                     return False
@@ -155,12 +156,12 @@ def _normalize_coords(scene: Scene) -> Scene:
     def _clamp(v):
         return min(1.0, max(0.0, v))
 
-    for p in scene.primitives:
-        if p.box:
+    for p in elements:
+        if getattr(p, "box", None):
             x0, y0, x1, y1 = p.box
             p.box = (_clamp(x0 / sx), _clamp(y0 / sy),
                      _clamp(x1 / sx), _clamp(y1 / sy))
-        if p.point:
+        if getattr(p, "point", None):
             x, y = p.point
             p.point = (_clamp(x / sx), _clamp(y / sy))
     scene.meta["coord_rescaled"] = {

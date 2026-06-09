@@ -6,9 +6,11 @@
 
 普通方案把图片描述成一段话:"左上角有个按钮,旁边是输入框"。这段散文落进了所谓的 **Reference Gap** —— 下游模型无法精确推理元素的相对位置、对齐、包含关系,密集布局(UI、表格、流程图)下尤其容易逻辑断裂、产生幻觉。
 
-DeepVision 受 [Thinking with Visual Primitives](https://github.com/ailuntx/Thinking-with-Visual-Primitives) 的"point-while-reasoning"思想启发,把图片解析成**机器可精确引用的视觉基元**:每个元素带稳定 id 和归一化坐标,下游模型可以"指着坐标推理",而不是面对模糊散文猜位置。
+DeepVision 受 [Thinking with Visual Primitives](https://github.com/ailuntx/Thinking-with-Visual-Primitives) 的"point-while-reasoning"思想启发,把图片解析成**机器可精确引用的层级视觉表示**:既有可读的语义单元,也有带稳定 id 和归一化坐标的视觉基元,下游模型可以先理解结构,再"指着坐标推理"。
 
 ```
+# 语义单元
+- [login_form] 登录表单 role=form bbox=(0.08,0.32,0.64,0.88) text="Email 输入框和 Submit 按钮" children=[email_input, submit_button]
 # 视觉基元(归一化坐标,原点左上)
 - [email_input] 邮箱输入框 bbox=(0.10,0.40,0.60,0.46) text="Email"
 - [submit_button] 提交按钮 bbox=(0.12,0.80,0.28,0.86) text="Submit"
@@ -18,7 +20,7 @@ DeepVision 受 [Thinking with Visual Primitives](https://github.com/ailuntx/Thin
 
 ## 核心能力
 
-- **结构化解析**:输出视觉基元(点 / bbox)+ 空间逻辑关系,而非扁平描述
+- **结构化解析**:输出语义单元(composites)+ 视觉基元(primitives)+ 空间逻辑关系,而非扁平描述
 - **坐标自适应**:模型不管返回 `[0,1]` / `0~1000` / 像素坐标,自动归一化
 - **抗幻觉自检**:可选的视觉证据核查,剔除模型凭空编造的元素(力度可选)
 - **多种接入**:CLI、Python API、skill、MCP server
@@ -147,6 +149,8 @@ print(scene.to_anchored_text())           # 给下游文本模型的锚点文本
 print(scene.to_json())                    # 结构化 JSON
 for p in scene.primitives:                # 遍历视觉基元
     print(p.id, p.label, p.box or p.point)
+for c in scene.composites:                # 遍历聚合语义单元
+    print(c.id, c.role, c.text, c.children)
 
 # 抗幻觉核查(可选)
 from deepvision.verify import verify_scene
@@ -226,13 +230,13 @@ python -m deepvision.mcp_server
 ## 工作原理
 
 ```
-图片 ─▶ 多模态 API ─▶ 结构化基元 ─▶ 坐标归一化 ─▶ 排序+几何关系推导 ─▶ [可选]核查 ─▶ 锚点文本/JSON
-      (任意视觉模型)  (id+坐标+语义关系) (压回[0,1])  (阅读序+坐标算空间关系)  (剔除幻觉)    (给下游模型)
+图片 ─▶ 多模态 API ─▶ 层级结构 ─▶ 坐标归一化 ─▶ 排序+几何关系推导 ─▶ [可选]核查 ─▶ 锚点文本/JSON
+      (任意视觉模型)  (语义单元+基元+关系) (压回[0,1])  (父容器内算空间关系)  (剔除幻觉)    (给下游模型)
 ```
 
-1. **解析**:把图片(自动缩放到长边上限)发给多模态模型,要求输出结构化 JSON(视觉基元 + 语义关系),而非散文。模型只产语义关系(labels/points_to/part_of)。
-2. **归一化**:模型常无视坐标约定,返回 `0~1000` 或像素坐标 —— 自动识别标度并压回 `[0,1]`。
-3. **排序 + 几何关系推导**:基元按阅读顺序(上→下、左→右)聚簇,缓解下游 Lost-in-the-Middle;above/left_of/contains 等几何关系直接从坐标确定性推导(只连最近邻与最小容器,有界而非两两),既消冗余也避免模型把方向标反。
+1. **解析**:把图片(自动缩放到长边上限)发给多模态模型,要求输出结构化 JSON(语义单元 + 视觉基元 + 语义关系),而非散文。模型只产语义关系(labels/points_to/part_of)。
+2. **归一化**:模型常无视坐标约定,返回 `0~1000` 或像素坐标 —— 自动识别标度并把语义单元和视觉基元都压回 `[0,1]`。
+3. **排序 + 几何关系推导**:基元按阅读顺序(上→下、左→右)聚簇,缓解下游 Lost-in-the-Middle;above/left_of/contains 等几何关系直接从坐标确定性推导,并限制在同一父语义单元内,既消冗余也避免跨题、跨表格、跨面板关系污染上下文。
 4. **核查(可选)**:把可疑(或全部)基元区域裁剪出来,用"无暗示"提问独立核对,剔除模型编造的元素。
 5. **输出**:锚点文本(给文本模型)或 JSON(给程序)。
 

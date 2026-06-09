@@ -1,8 +1,8 @@
 """视觉表示的数据结构。
 
 这是 DeepVision 区别于扁平描述方案的核心:图像被表示为
-一组带归一化坐标的视觉基元(Primitive)和它们之间的关系
-(Relation),下游推理可以通过 id 精确引用任意元素。
+一组聚合语义单元(Composite)、带归一化坐标的视觉基元(Primitive)
+和它们之间的关系(Relation),下游推理可以通过 id 精确引用任意元素。
 
 坐标约定:全部使用归一化坐标 [0,1],原点在左上角。
 - point: (x, y)
@@ -27,6 +27,8 @@ class Primitive:
     point: Optional[Tuple[float, float]] = None
     text: Optional[str] = None  # OCR / 可读文本
     confidence: Optional[float] = None
+    role: Optional[str] = None  # 通用语义角色,如 problem_number / button / cell
+    parent: Optional[str] = None  # 所属 Composite id,用于限制跨块关系噪声
 
     def center(self) -> Tuple[float, float]:
         """返回基元中心点,用于关系推理。"""
@@ -36,6 +38,27 @@ class Primitive:
             x0, y0, x1, y1 = self.box
             return ((x0 + x1) / 2, (y0 + y1) / 2)
         raise ValueError(f"primitive {self.id} 既无 point 也无 box")
+
+
+@dataclass
+class Composite:
+    """由多个视觉基元组成的语义单元,如题目、表格、表单、流程节点组。"""
+
+    id: str
+    type: str = "composite"
+    label: str = ""
+    role: Optional[str] = None
+    box: Optional[Tuple[float, float, float, float]] = None
+    text: Optional[str] = None
+    children: List[str] = field(default_factory=list)
+    parent: Optional[str] = None
+    confidence: Optional[float] = None
+
+    def center(self) -> Tuple[float, float]:
+        if self.box is not None:
+            x0, y0, x1, y1 = self.box
+            return ((x0 + x1) / 2, (y0 + y1) / 2)
+        raise ValueError(f"composite {self.id} 无 box")
 
 
 @dataclass
@@ -63,14 +86,18 @@ class Scene:
     summary: str
     primitives: List[Primitive] = field(default_factory=list)
     relations: List[Relation] = field(default_factory=list)
+    composites: List[Composite] = field(default_factory=list)
     width: Optional[int] = None  # 原图像素宽,便于反归一化
     height: Optional[int] = None
     meta: Dict[str, Any] = field(default_factory=dict)
 
-    def by_id(self, pid: str) -> Optional[Primitive]:
+    def by_id(self, pid: str) -> Optional[Any]:
         for p in self.primitives:
             if p.id == pid:
                 return p
+        for c in self.composites:
+            if c.id == pid:
+                return c
         return None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -81,12 +108,17 @@ class Scene:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Scene":
-        prims = [Primitive(**p) for p in d.get("primitives", [])]
-        rels = [Relation(**r) for r in d.get("relations", [])]
+        prims = [Primitive(**_clean_dataclass_input(p, Primitive))
+                 for p in d.get("primitives", [])]
+        comps = [Composite(**_clean_dataclass_input(c, Composite))
+                 for c in d.get("composites", [])]
+        rels = [Relation(**_clean_dataclass_input(r, Relation))
+                for r in d.get("relations", [])]
         return cls(
             summary=d.get("summary", ""),
             primitives=prims,
             relations=rels,
+            composites=comps,
             width=d.get("width"),
             height=d.get("height"),
             meta=d.get("meta", {}),
@@ -98,23 +130,52 @@ class Scene:
         这是消除 Reference Gap 的关键产物:每个元素都带稳定 id 和
         坐标,模型可以 point-while-reasoning,而不是面对一段模糊散文。
         """
-        lines = [f"# 场景总览\n{self.summary}\n", "# 视觉基元(归一化坐标,原点左上)"]
+        lines = [f"# 场景总览\n{self.summary}\n"]
+        if self.composites:
+            lines.append("# 语义单元(聚合结构,优先供下游理解)")
+            for c in self.composites:
+                loc = _loc_of(c)
+                role = f" role={c.role}" if c.role else ""
+                txt = f' text="{c.text}"' if c.text else ""
+                children = f" children=[{', '.join(c.children)}]" if c.children else ""
+                parent = f" parent={c.parent}" if c.parent else ""
+                lines.append(f"- [{c.id}] {c.label}{role} {loc}{txt}{children}{parent}")
+            lines.append("")
+
+        lines.append("# 视觉基元(归一化坐标,原点左上)")
         for p in self.primitives:
-            if p.type == "bbox" and p.box:
-                x0, y0, x1, y1 = p.box
-                loc = f"bbox=({x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f})"
-            elif p.point:
-                loc = f"point=({p.point[0]:.3f},{p.point[1]:.3f})"
-            else:
-                loc = "无坐标"
+            loc = _loc_of(p)
+            role = f" role={p.role}" if p.role else ""
+            parent = f" parent={p.parent}" if p.parent else ""
             txt = f' text="{p.text}"' if p.text else ""
-            lines.append(f"- [{p.id}] {p.label} {loc}{txt}")
+            lines.append(f"- [{p.id}] {p.label}{role} {loc}{parent}{txt}")
         if self.relations:
             lines.append("\n# 关系")
             for r in self.relations:
                 note = f" ({r.note})" if r.note else ""
                 lines.append(f"- {r.subj} --{r.rel}--> {r.obj}{note}")
         return "\n".join(lines)
+
+
+def _clean_dataclass_input(data: Dict[str, Any], cls) -> Dict[str, Any]:
+    """按 dataclass 字段过滤模型输出,兼容 bbox 别名和额外字段。"""
+    item = dict(data)
+    if "bbox" in item and "box" not in item:
+        item["box"] = item["bbox"]
+    if cls is Composite and item.get("children") is None:
+        item["children"] = []
+    known = set(cls.__dataclass_fields__)
+    return {k: v for k, v in item.items() if k in known}
+
+
+def _loc_of(item: Any) -> str:
+    if getattr(item, "box", None):
+        x0, y0, x1, y1 = item.box
+        return f"bbox=({x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f})"
+    if getattr(item, "point", None):
+        x, y = item.point
+        return f"point=({x:.3f},{y:.3f})"
+    return "无坐标"
 
 
 # ---------------------------------------------------------------------------
@@ -150,16 +211,20 @@ def _contains(outer: Tuple[float, float, float, float],
             (ox1 - ox0) * (oy1 - oy0) > (ix1 - ix0) * (iy1 - iy0) + eps)
 
 
+def _same_parent(a: Primitive, b: Primitive) -> bool:
+    return a.parent == b.parent
+
+
 def derive_geometric_relations(primitives: List[Primitive],
                                align_tol: float = 0.02) -> List[Relation]:
-    """从坐标推导一组**有界**的几何关系,O(n) 量级而非两两 O(n²)。
+    """从坐标推导一组**有界**的几何关系,并限制在同一父容器内。
 
     产出两类:
       - contains:每个基元只连到它**最小的直接容器**(包含森林,非传递闭包)。
       - left_of / above:每个基元在水平/垂直方向上,只连到投影重叠的**最近邻**。
         right_of / below 是它们的逆,不重复产出。
 
-    这样 50 个元素也只得到 ~O(n) 条有用拓扑,而不是上千条冗余边。
+    这样可以避免不同题目、表格、面板之间产生低价值的跨块关系。
     """
     rects: List[Tuple[Primitive, Tuple[float, float, float, float]]] = []
     for p in primitives:
@@ -175,6 +240,8 @@ def derive_geometric_relations(primitives: List[Primitive],
         best_area = float("inf")
         for pj, rj in rects:
             if pi is pj:
+                continue
+            if not _same_parent(pi, pj):
                 continue
             if _contains(rj, ri):
                 area = (rj[2] - rj[0]) * (rj[3] - rj[1])
@@ -195,6 +262,8 @@ def derive_geometric_relations(primitives: List[Primitive],
         for pj, rj in rects:
             if pi is pj or pj.id in contained:
                 continue
+            if not _same_parent(pi, pj):
+                continue
             if _overlap_1d(ri[1], ri[3], rj[1], rj[3]) <= 0:
                 continue  # 垂直不重叠,不算同一行
             gap = rj[0] - ri[2]  # pj 在 pi 右侧的水平间隙
@@ -212,6 +281,8 @@ def derive_geometric_relations(primitives: List[Primitive],
         best_gap = float("inf")
         for pj, rj in rects:
             if pi is pj or pj.id in contained:
+                continue
+            if not _same_parent(pi, pj):
                 continue
             if _overlap_1d(ri[0], ri[2], rj[0], rj[2]) <= 0:
                 continue  # 水平不重叠,不算同一列

@@ -9,6 +9,7 @@ from .config import Config
 from .schema import (
     Scene,
     Primitive,
+    Composite,
     Relation,
     derive_geometric_relations,
     sort_reading_order,
@@ -19,6 +20,7 @@ __all__ = [
     "Config",
     "Scene",
     "Primitive",
+    "Composite",
     "Relation",
     "derive_geometric_relations",
     "sort_reading_order",

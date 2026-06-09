@@ -22,15 +22,30 @@
     {
       "id": "稳定的语义化英文 id,如 btn_submit、row_3、node_start",
       "type": "bbox 或 point",
+      "role": "可选角色,如 button/input/text/formula_part/cell/node",
       "label": "中文语义标签,如 提交按钮",
       "box": [x0,y0,x1,y1],        // type=bbox 时必填
       "point": [x,y],               // type=point 时必填
+      "parent": "所属 composite id,没有则省略",
       "text": "元素内的可读文字(OCR),没有则省略",
       "confidence": 0.0~1.0         // 你的把握程度
     }
   ],
+  "composites": [
+    {
+      "id": "稳定的语义化英文 id,如 problem_10、login_form、table_1",
+      "type": "composite",
+      "role": "语义角色,如 problem/expression/form/table/row/cell/paragraph/toolbar/chart/node_group",
+      "label": "中文语义标签,如 第10题、登录表单、价格表",
+      "box": [x0,y0,x1,y1],
+      "text": "聚合后的可读内容,尽量还原自然阅读顺序;没有则省略",
+      "children": ["由哪些 primitive 或 composite id 组成"],
+      "parent": "上级 composite id,没有则省略",
+      "confidence": 0.0~1.0
+    }
+  ],
   "relations": [
-    { "subj": "基元id", "rel": "关系", "obj": "基元id", "note": "可选说明" }
+    { "subj": "基元或语义单元id", "rel": "关系", "obj": "基元或语义单元id", "note": "可选说明" }
   ]
 }
 
@@ -45,12 +60,28 @@
 aligned_with 这类几何关系——它们会由 bbox 坐标确定性地推导出来,你输出反而
 可能把方向标反。把坐标标准,几何关系自然就对了。
 
+# 语义聚合要求
+
+除了最小可定位的 primitives,还要输出 composites。composite 是由多个
+primitives 组成的可读语义单元,用于让下游先理解结构,再按需引用坐标。
+
+- 文档/题目:为每道题、每个段落、每个公式、每个列表项建立 composite。
+- UI/截图:为表单、工具栏、卡片、菜单、按钮组、面板建立 composite。
+- 表格:为 table、row、cell 建立 composite,cell 的 text 尽量完整。
+- 流程图/拓扑:为节点组、完整节点、连线组建立 composite。
+- 图表:为 chart、axis、legend、series、关键标注建立 composite。
+
+层级用 `parent` 和 `children` 表达,不要用几何关系表达包含。primitives 的
+`parent` 应指向最直接的 composite。composite 的 `text` 应尽量给出该单元
+按自然阅读顺序聚合后的内容,例如一道数学题的完整表达式、一个表格单元的
+完整文本、一个表单区域内的控件概览。
+
 # 解析重点(按图片类型自适应)
 
 - UI/截图:识别每个可交互控件(按钮、输入框、菜单、图标)、它们的
   文字、以及"哪段文字标注哪个控件"这类语义归属。控件之间的包含/对齐
-  靠坐标推导,你只管把 bbox 标准。
-- 文档/表格:把表格拆成行列单元格基元,坐标标准即可还原行列;
+  靠坐标推导,并用 composites 表达表单、面板、工具栏等分组。
+- 文档/表格:把表格拆成行列单元格基元和 table/row/cell composites;
   图表则标出坐标轴、数据系列、关键数据点。
 - 流程图/拓扑:每个节点一个基元,每条边用 points_to 关系表达方向。
 - 自然图像:标出主要物体,坐标标准即可支撑计数与空间推理。
