@@ -117,6 +117,24 @@ def test_anchored_text_lists_composites_before_primitives():
     assert text.index("[login_form]") < text.index("[email_input]")
 
 
+def test_anchored_text_includes_count_hints():
+    s = Scene(
+        summary="s",
+        meta={"count_hints": {
+            "visual_markers": [
+                {"id": "visual_marker_1", "point": (0.1, 0.2), "color": "yellow"},
+                {"id": "visual_marker_2", "point": (0.3, 0.4), "color": "red"},
+            ],
+        }},
+    )
+
+    text = s.to_anchored_text()
+
+    assert "# 自动计数线索" in text
+    assert "visual_markers count=2" in text
+    assert "visual_marker_1@(0.100,0.200)" in text
+
+
 def test_by_id_missing_returns_none():
     assert _sample_scene().by_id("nope") is None
 
@@ -376,6 +394,167 @@ def test_describe_structured_count_intent_uses_fine_count_prompt():
     assert "不要用常识默认数量" in prompts[0]
 
 
+def test_describe_structured_count_target_focuses_prompt():
+    """target 是短目标词,用于告诉 count/ocr/locate 等意图关注什么。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(
+            _tiny_png_bytes(20, 10),
+            cfg,
+            intent="count",
+            target="手指",
+        )
+        assert scene.meta["target"] == "手指"
+    finally:
+        mk.undo()
+
+    assert len(prompts) == 1
+    assert "target=手指" in prompts[0]
+    assert "只围绕该目标" in prompts[0]
+    assert "彩色点" in prompts[0]
+    assert "不要因为无法命名为常规类别就丢弃实例" in prompts[0]
+
+
+def test_describe_structured_count_target_works_without_marker_hints():
+    """无标记图片也应走通用候选实例核查,而不是依赖 visual_markers。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(
+            _tiny_png_bytes(20, 10),
+            cfg,
+            intent="count",
+            target="车辆",
+        )
+    finally:
+        mk.undo()
+
+    assert "count_hints" not in scene.meta
+    assert "visual_markers count=" not in prompts[0]
+    assert "候选实例列表" in prompts[0]
+    assert "即使没有视觉标记" in prompts[0]
+    assert "边界、遮挡、重叠" in prompts[0]
+    assert "视觉标记只是辅助证据" in prompts[0]
+
+
+def test_describe_structured_ocr_target_does_not_use_count_prompt():
+    """ocr target 应关注目标区域转写,不能带入计数语义。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(
+            _tiny_png_bytes(20, 10),
+            cfg,
+            intent="ocr",
+            target="公式",
+        )
+        assert scene.meta["target"] == "公式"
+    finally:
+        mk.undo()
+
+    assert len(prompts) == 1
+    assert "target=公式" in prompts[0]
+    assert "完整转写目标区域" in prompts[0]
+    assert "上下标" in prompts[0]
+    assert "总数" not in prompts[0]
+    assert "目标计数" not in prompts[0]
+    assert "彩色点" not in prompts[0]
+
+
+def test_describe_structured_count_detects_yellow_marker_hints():
+    """count intent 应把本地彩色标记点检测结果加入 prompt/meta/锚点文本。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(
+            _yellow_markers_png(6),
+            cfg,
+            intent="count",
+            target="手指",
+        )
+    finally:
+        mk.undo()
+
+    assert "visual_markers count=6" in prompts[0]
+    assert len(scene.meta["count_hints"]["visual_markers"]) == 6
+    assert "visual_markers count=6" in scene.to_anchored_text()
+
+
+def test_describe_structured_count_detects_red_marker_hints():
+    """本地计数线索不应只支持黄点或特定手指场景。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(
+            _colored_markers_png(4, (255, 40, 40)),
+            cfg,
+            intent="count",
+            target="按钮",
+        )
+    finally:
+        mk.undo()
+
+    assert "visual_markers count=4" in prompts[0]
+    assert len(scene.meta["count_hints"]["visual_markers"]) == 4
+    assert "visual_markers count=4" in scene.to_anchored_text()
+
+
 def test_describe_structured_rejects_unknown_detail():
     cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
     try:
@@ -560,7 +739,7 @@ def test_cli_process_one_passes_detail_to_structured_parser():
     mk = _Monkey()
     try:
         mk.set(cli, "describe_structured",
-               lambda image, cfg, detail="standard", intent="general": seen.append(detail) or Scene(summary="ok"))
+               lambda image, cfg, detail="standard", intent="general", target="": seen.append(detail) or Scene(summary="ok"))
         scene = cli._process_one(b"img", Args(), Config(api_key="k", base_url="http://x", model="m"))
     finally:
         mk.undo()
@@ -579,7 +758,7 @@ def test_cli_process_one_passes_intent_to_structured_parser():
     seen = []
     mk = _Monkey()
     try:
-        def fake_describe(image, cfg, detail="standard", intent="general"):
+        def fake_describe(image, cfg, detail="standard", intent="general", target=""):
             seen.append((detail, intent))
             return Scene(summary="ok")
 
@@ -590,6 +769,30 @@ def test_cli_process_one_passes_intent_to_structured_parser():
 
     assert scene.summary == "ok"
     assert seen == [("standard", "count")]
+
+
+def test_cli_process_one_passes_target_to_structured_parser():
+    class Args:
+        detail = "standard"
+        intent = "count"
+        target = "手指"
+        verify = None
+        refine = False
+
+    seen = []
+    mk = _Monkey()
+    try:
+        def fake_describe(image, cfg, detail="standard", intent="general", target=""):
+            seen.append((detail, intent, target))
+            return Scene(summary="ok")
+
+        mk.set(cli, "describe_structured", fake_describe)
+        scene = cli._process_one(b"img", Args(), Config(api_key="k", base_url="http://x", model="m"))
+    finally:
+        mk.undo()
+
+    assert scene.summary == "ok"
+    assert seen == [("standard", "count", "手指")]
 
 
 def test_grab_clipboard_uses_windows_fallback_when_pillow_misses_bitmap():
@@ -647,6 +850,24 @@ def _tiny_png_bytes(w, h):
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _yellow_markers_png(n):
+    return _colored_markers_png(n, (255, 220, 0))
+
+
+def _colored_markers_png(n, color):
+    import io
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (240, 120), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+    for i in range(n):
+        cx = 20 + i * 35
+        cy = 60
+        draw.ellipse((cx - 5, cy - 5, cx + 5, cy + 5), fill=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 

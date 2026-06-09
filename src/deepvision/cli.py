@@ -190,6 +190,7 @@ def _process_one(image, args, cfg):
         cfg,
         detail=getattr(args, "detail", "standard"),
         intent=getattr(args, "intent", "general"),
+        target=getattr(args, "target", ""),
     )
     if args.verify:
         scene = verify_scene(image, scene, level=args.verify, cfg=cfg)
@@ -222,6 +223,8 @@ def main(argv=None) -> int:
     ap.add_argument("--intent", default="general",
                     choices=["general", "count", "ocr", "locate", "inspect"],
                     help="任务意图:general=通用解析,count=计数,ocr=转写,locate=定位,inspect=复核/找异常")
+    ap.add_argument("--target", default="",
+                    help="任务关注的短目标词,如 手指、按钮、表格、标题;不要传完整问题")
     ap.add_argument("-m", "--model", help="覆盖模型 id")
     ap.add_argument("-t", "--temperature", type=float, help="采样温度")
     ap.add_argument("-s", "--max-edge", type=int, dest="max_edge", help="长边像素上限")

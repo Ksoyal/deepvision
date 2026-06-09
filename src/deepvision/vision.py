@@ -7,6 +7,7 @@ describe_structured() 把图片解析成带坐标锚点的 Scene(本项目的核
 from __future__ import annotations
 
 import base64
+import colorsys
 import hashlib
 import io
 import json
@@ -14,7 +15,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 
 import requests
@@ -63,7 +64,12 @@ _INTENT_PROMPT_ADDENDA = {
 
 目标是精确计数。对用户可能关心的重复对象、标记点、独立实例逐个枚举,
 再给出总数。不要用常识默认数量替代图像证据,尤其要注意多出、缺失、重叠或异常的可见实例。
-如果存在黄色点、圈注、编号或其他视觉标记,优先把这些标记作为计数线索,并说明每个实例的位置。
+计数时先建立候选实例列表,按位置顺序给目标实例编号(target_1、target_2...),再尝试命名;不要先套用标准类别。
+即使没有视觉标记,也必须基于图像本身逐个寻找候选实例。
+候选实例列表至少检查目标外观、边界、遮挡、重叠、局部可见、相似干扰、异常多出或缺失。
+如果标准类别数量不足以覆盖可见实例,保留额外编号实例,不要把它合并或忽略。
+视觉标记只是辅助证据。如果存在彩色点、圈注、编号、箭头或其他视觉标记,先判断它们是否与目标实例对应;
+若对应,把它们作为计数线索并说明每个实例的位置;若不对应,不要采用标记数量。
 遮挡或不确定的实例要标低 confidence 或说明不确定,不要强行并入常规数量。
 """,
     "ocr": """
@@ -83,6 +89,46 @@ _INTENT_PROMPT_ADDENDA = {
 
 目标是仔细检查、复核或发现异常。逐项列出可疑、不一致、额外、缺失、遮挡或与常识不同的视觉证据。
 不要用常识覆盖图像中的异常现象;不确定时明确标注不确定。
+""",
+}
+_TARGET_PROMPT_ADDENDA = {
+    "general": """
+# 目标对象(target={target})
+
+当前任务关注目标是: {target}。在保持全图客观结构的前提下,优先保留与该目标相关的语义单元、
+视觉基元、文字和空间关系。不要因为有 target 就忽略周边必要上下文。
+""",
+    "count": """
+# 目标对象(target={target})
+
+当前任务关注目标是: {target}。只围绕该目标建立可核验的候选实例列表和总数。
+不要把其他可数对象混入目标计数;也不要用目标的常识默认数量覆盖图像证据。
+即使没有视觉标记,也必须依据目标外观、边界、遮挡、重叠、局部可见部分和相似干扰物逐个核查。
+视觉标记只是辅助证据。如果目标附近存在彩色点、圈注、编号、箭头或其他视觉标记,
+应先判断它们是否与目标实例对应,再作为候选实例的重要证据。
+对目标实例使用从左到右、从上到下或自然阅读顺序的编号,不要因为无法命名为常规类别就丢弃实例。
+""",
+    "ocr": """
+# 目标对象(target={target})
+
+当前任务关注目标是: {target}。完整转写目标区域中的可读内容,并保留自然阅读顺序、换行、
+标点、大小写、表格行列、代码缩进和数学结构。遇到公式时要保留分式、括号、根号、
+上下标、极限下标、指数、求和/积分上下限等结构关系,不要按语义补写看不清的字符。
+目标周边如果包含题号、标题、单位、图例或必要条件,也应作为上下文保留。
+""",
+    "locate": """
+# 目标对象(target={target})
+
+当前任务关注目标是: {target}。优先输出该目标及其关键参照物的稳定 id、bbox/point、parent
+和空间关系,使下游可以回答位置、方向、第几个、靠近什么、包含于哪个区域等问题。
+不要把与定位无关的细碎文本或装饰元素作为主要输出。
+""",
+    "inspect": """
+# 目标对象(target={target})
+
+当前任务关注目标是: {target}。围绕该目标仔细复核可疑、异常、缺失、额外、遮挡、
+重叠或不一致的视觉证据。保留必要上下文,但不要用常识覆盖图像中的异常现象。
+不确定时标低 confidence 或明确说明不确定。
 """,
 }
 
@@ -252,6 +298,10 @@ def _normalize_intent(intent: Optional[str]) -> str:
     return value
 
 
+def _normalize_target(target: Optional[str]) -> str:
+    return (target or "").strip()
+
+
 def _detail_for_intent(detail: Optional[str], intent: Optional[str]) -> str:
     value = _normalize_detail(detail)
     intent_value = _normalize_intent(intent)
@@ -264,9 +314,13 @@ def _prompt_for_detail(detail: Optional[str]) -> str:
     return _prompt_for_options(detail, "general")
 
 
-def _prompt_for_options(detail: Optional[str], intent: Optional[str]) -> str:
+def _prompt_for_options(detail: Optional[str],
+                        intent: Optional[str],
+                        target: Optional[str] = "",
+                        count_hints: Optional[dict] = None) -> str:
     intent_value = _normalize_intent(intent)
     detail_value = _detail_for_intent(detail, intent_value)
+    target_value = _normalize_target(target)
     prompt = (
         _load_prompt("structured.md").rstrip()
         + "\n\n"
@@ -275,7 +329,28 @@ def _prompt_for_options(detail: Optional[str], intent: Optional[str]) -> str:
     )
     if intent_value != "general":
         prompt += "\n" + _INTENT_PROMPT_ADDENDA[intent_value].strip() + "\n"
+    if target_value:
+        prompt += "\n" + _TARGET_PROMPT_ADDENDA[intent_value].format(target=target_value).strip() + "\n"
+    hint_text = _format_count_hints(count_hints or {})
+    if hint_text:
+        prompt += "\n" + hint_text + "\n"
     return prompt
+
+
+def _format_count_hints(count_hints: dict) -> str:
+    markers = count_hints.get("visual_markers") or []
+    if not markers:
+        return ""
+    points = ", ".join(
+        f"{m['id']}:{m.get('color', 'color')}@({m['point'][0]:.3f},{m['point'][1]:.3f})"
+        for m in markers[:30]
+    )
+    return (
+        "# 本地视觉计数线索\n\n"
+        f"visual_markers count={len(markers)} points=[{points}]\n"
+        "这些线索来自本地像素检测,表示可能的彩色标记点或注释点,不是语言常识或最终答案。"
+        "若目标实例与这些标记点对应,应逐个核对这些标记点;若不对应,不要强行采用该数量。"
+    )
 
 
 def _is_http_url(value: str) -> bool:
@@ -285,6 +360,11 @@ def _is_http_url(value: str) -> bool:
 def _image_from_bytes(data: bytes) -> Image.Image:
     with Image.open(io.BytesIO(data)) as img:
         return img.convert("RGB")
+
+
+def _image_from_data_uri(data_uri: str) -> Image.Image:
+    _, b64 = data_uri.split(",", 1)
+    return _image_from_bytes(base64.b64decode(b64))
 
 
 def _load_image(image: Union[str, Path, bytes]) -> Image.Image:
@@ -325,6 +405,107 @@ def _to_data_uri(image: Union[str, Path, bytes], max_edge: int) -> tuple[str, in
     img.save(buf, format="PNG")
     uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
     return uri, img.width, img.height
+
+
+def _count_hints_from_data_uri(data_uri: str) -> dict:
+    img = _image_from_data_uri(data_uri)
+    markers = _detect_visual_markers(img)
+    return {"visual_markers": markers} if markers else {}
+
+
+def _detect_visual_markers(img: Image.Image) -> list[dict[str, Any]]:
+    """Detect repeated small saturated marker-like blobs as count evidence."""
+    w, h = img.size
+    pix = img.load()
+    mask: dict[tuple[int, int], str] = {}
+    for y in range(h):
+        for x in range(w):
+            r, g, b = pix[x, y]
+            color = _marker_color_name(r, g, b)
+            if color:
+                mask[(x, y)] = color
+
+    seen = set()
+    candidates = []
+    max_diameter = max(12, int(min(w, h) * 0.08))
+    min_area = max(8, int(w * h * 0.00001))
+    max_area = max(200, int(w * h * 0.003))
+
+    for start in list(mask.keys()):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        xs, ys = [], []
+        colors: dict[str, int] = {}
+        while stack:
+            x, y = stack.pop()
+            xs.append(x)
+            ys.append(y)
+            color = mask[(x, y)]
+            colors[color] = colors.get(color, 0) + 1
+            for nx in (x - 1, x, x + 1):
+                for ny in (y - 1, y, y + 1):
+                    p = (nx, ny)
+                    if p in mask and p not in seen:
+                        seen.add(p)
+                        stack.append(p)
+
+        area = len(xs)
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        if not (min_area <= area <= max_area):
+            continue
+        bw = x1 - x0 + 1
+        bh = y1 - y0 + 1
+        if bw > max_diameter or bh > max_diameter:
+            continue
+        aspect = max(bw, bh) / max(1, min(bw, bh))
+        fill_ratio = area / max(1, bw * bh)
+        if aspect > 1.8 or fill_ratio < 0.35:
+            continue
+        color = max(colors, key=colors.get)
+        candidates.append({
+            "area": area,
+            "color": color,
+            "box": (x0 / w, y0 / h, x1 / w, y1 / h),
+            "point": ((x0 + x1) / 2 / w, (y0 + y1) / 2 / h),
+        })
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in candidates:
+        grouped.setdefault(item["color"], []).append(item)
+
+    markers = []
+    for items in grouped.values():
+        if len(items) >= 2:
+            markers.extend(items)
+
+    markers.sort(key=lambda item: (item["point"][1], item["point"][0]))
+    for i, item in enumerate(markers, 1):
+        item["id"] = f"visual_marker_{i}"
+    return markers
+
+
+def _marker_color_name(r: int, g: int, b: int) -> str:
+    value = max(r, g, b)
+    chroma = value - min(r, g, b)
+    if value < 140 or chroma < 80:
+        return ""
+    hue = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360
+    if hue < 15 or hue >= 345:
+        return "red"
+    if hue < 45:
+        return "orange"
+    if hue < 75:
+        return "yellow"
+    if hue < 165:
+        return "green"
+    if hue < 205:
+        return "cyan"
+    if hue < 265:
+        return "blue"
+    return "purple"
 
 
 def _call_api(cfg: Config, prompt: str, data_uri: str, question: str = "") -> str:
@@ -449,23 +630,30 @@ def _extract_json(text: str) -> dict:
 def describe_structured(image: Union[str, Path, bytes],
                         cfg: Optional[Config] = None,
                         detail: str = "standard",
-                        intent: str = "general") -> Scene:
+                        intent: str = "general",
+                        target: str = "") -> Scene:
     """核心接口:把图片解析成带坐标锚点的结构化 Scene。
 
     默认产出客观全量解析,不传用户问题;intent 只传递任务类型,
-    用于选择计数、OCR、定位或复核这类更严格的解析约束。
+    target 只传递短目标词,并按 intent 解释为计数、OCR、定位或复核的关注对象。
     """
     cfg = cfg or Config.load()
     intent = _normalize_intent(intent)
     detail = _detail_for_intent(detail, intent)
+    target = _normalize_target(target)
     data_uri, w, h = _to_data_uri(image, cfg.max_edge)
-    prompt = _prompt_for_options(detail, intent)
+    count_hints = _count_hints_from_data_uri(data_uri) if intent == "count" else {}
+    prompt = _prompt_for_options(detail, intent, target, count_hints)
     raw = _call_api(cfg, prompt, data_uri)
     data = _extract_json(raw)
     scene = Scene.from_dict(data)
     scene.width, scene.height = w, h
     scene.meta["detail"] = detail
     scene.meta["intent"] = intent
+    if target:
+        scene.meta["target"] = target
+    if count_hints:
+        scene.meta["count_hints"] = count_hints
     scene = _normalize_coords(scene)
     # 坐标就绪后:按阅读顺序聚簇,并用坐标补齐几何关系(模型只给语义关系)。
     scene.primitives = sort_reading_order(scene.primitives)

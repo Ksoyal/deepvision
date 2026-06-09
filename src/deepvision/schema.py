@@ -131,6 +131,20 @@ class Scene:
         坐标,模型可以 point-while-reasoning,而不是面对一段模糊散文。
         """
         lines = [f"# 场景总览\n{self.summary}\n"]
+        count_hints = self.meta.get("count_hints") if self.meta else None
+        if count_hints:
+            lines.append("# 自动计数线索")
+            for name, items in count_hints.items():
+                if not items:
+                    continue
+                points = []
+                for item in items[:30]:
+                    x, y = item.get("point", (None, None))
+                    if x is None or y is None:
+                        continue
+                    points.append(f"{item.get('id', name)}@({x:.3f},{y:.3f})")
+                lines.append(f"- {name} count={len(items)} points=[{', '.join(points)}]")
+            lines.append("")
         if self.composites:
             lines.append("# 语义单元(聚合结构,优先供下游理解)")
             for c in self.composites:
