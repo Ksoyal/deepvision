@@ -16,7 +16,7 @@ from PIL import Image
 
 from .config import Config
 from .schema import Scene, Primitive
-from .vision import _to_data_uri, _call_api, _extract_json, _load_prompt
+from .vision import _to_data_uri, _call_api, _extract_json, _load_prompt, _load_image
 
 
 def _crop_bbox(img: Image.Image, box, pad: float = 0.05) -> Image.Image:
@@ -44,12 +44,10 @@ def refine_region(
         raise ValueError("只能细化带 bbox 的基元")
     cfg = cfg or Config.load()
 
-    if isinstance(image, (str, Path)) and Path(image).is_file():
-        img = Image.open(image).convert("RGB")
-    elif isinstance(image, bytes):
-        img = Image.open(io.BytesIO(image)).convert("RGB")
-    else:
-        raise ValueError("refine 需要文件路径或 bytes 输入")
+    try:
+        img = _load_image(image)
+    except ValueError as e:
+        raise ValueError("refine 需要文件路径、URL、bytes 或 data URI 输入") from e
 
     crop = _crop_bbox(img, primitive.box)
     buf = io.BytesIO()

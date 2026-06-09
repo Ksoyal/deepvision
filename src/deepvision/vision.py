@@ -15,6 +15,7 @@ import re
 import time
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image
@@ -25,6 +26,7 @@ from .schema import Scene, derive_geometric_relations, sort_reading_order
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 _CACHE_DIR = Path.home() / ".deepvision" / "cache"
+_IMAGE_FETCH_TIMEOUT = 30
 
 
 def _cache_key(model: str, prompt: str, data_uri: str, question: str) -> str:
@@ -124,11 +126,31 @@ def _normalize_coords(scene: Scene) -> Scene:
     if mx <= 1.5:
         return scene  # 已是归一化坐标
 
-    if mx <= 1000:
+    def _fits_image_pixels() -> bool:
+        if not scene.width or not scene.height:
+            return False
+        for p in scene.primitives:
+            if p.box:
+                x0, y0, x1, y1 = p.box
+                if max(x0, x1) > scene.width or max(y0, y1) > scene.height:
+                    return False
+            if p.point:
+                x, y = p.point
+                if x > scene.width or y > scene.height:
+                    return False
+        return True
+
+    if _fits_image_pixels():
+        sx = float(scene.width)
+        sy = float(scene.height)
+        source = "image_pixels"
+    elif mx <= 1000:
         sx = sy = 1000.0  # 0~1000 标度
+        source = "thousand_grid"
     else:
         sx = float(scene.width or mx)   # 像素标度
         sy = float(scene.height or mx)
+        source = "large_pixels"
 
     def _clamp(v):
         return min(1.0, max(0.0, v))
@@ -141,7 +163,12 @@ def _normalize_coords(scene: Scene) -> Scene:
         if p.point:
             x, y = p.point
             p.point = (_clamp(x / sx), _clamp(y / sy))
-    scene.meta["coord_rescaled"] = {"detected_max": mx, "scale_x": sx, "scale_y": sy}
+    scene.meta["coord_rescaled"] = {
+        "detected_max": mx,
+        "scale_x": sx,
+        "scale_y": sy,
+        "source": source,
+    }
     return scene
 
 
@@ -150,19 +177,44 @@ def _load_prompt(name: str) -> str:
     return (_PROMPT_DIR / name).read_text(encoding="utf-8")
 
 
+def _is_http_url(value: str) -> bool:
+    return urlparse(value).scheme in {"http", "https"}
+
+
+def _image_from_bytes(data: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(data)) as img:
+        return img.convert("RGB")
+
+
+def _load_image(image: Union[str, Path, bytes]) -> Image.Image:
+    """把文件路径、URL、bytes 或 data URI 统一载入为 RGB Image。"""
+    if isinstance(image, bytes):
+        return _image_from_bytes(image)
+
+    if isinstance(image, str) and image.startswith("data:"):
+        try:
+            _, b64 = image.split(",", 1)
+        except ValueError as e:
+            raise ValueError("不支持的 data URI:缺少逗号分隔的 base64 内容") from e
+        return _image_from_bytes(base64.b64decode(b64))
+
+    if isinstance(image, str) and _is_http_url(image):
+        resp = requests.get(image, timeout=_IMAGE_FETCH_TIMEOUT)
+        resp.raise_for_status()
+        return _image_from_bytes(resp.content)
+
+    if isinstance(image, (str, Path)):
+        path = Path(image)
+        if path.is_file():
+            with Image.open(path) as img:
+                return img.convert("RGB")
+
+    raise ValueError("不支持的图像输入:需要文件路径、URL、bytes 或 data URI")
+
+
 def _to_data_uri(image: Union[str, Path, bytes], max_edge: int) -> tuple[str, int, int]:
     """把各种输入统一成缩放后的 PNG data URI,返回 (uri, width, height)。"""
-    if isinstance(image, (str, Path)) and Path(image).is_file():
-        img = Image.open(image)
-    elif isinstance(image, bytes):
-        img = Image.open(io.BytesIO(image))
-    elif isinstance(image, str) and image.startswith("data:"):
-        header, b64 = image.split(",", 1)
-        img = Image.open(io.BytesIO(base64.b64decode(b64)))
-    else:
-        raise ValueError("不支持的图像输入:需要文件路径、bytes 或 data URI")
-
-    img = img.convert("RGB")
+    img = _load_image(image)
     w, h = img.size
     scale = min(1.0, max_edge / max(w, h))
     if scale < 1.0:

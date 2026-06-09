@@ -17,6 +17,8 @@ from deepvision.schema import (
     derive_geometric_relations, sort_reading_order,
 )
 from deepvision import vision
+import deepvision.refine as refine
+import deepvision.verify as verify
 from deepvision.config import Config
 
 
@@ -114,7 +116,7 @@ def test_normalize_already_unit():
 def test_normalize_thousand_scale():
     s = Scene(summary="t", primitives=[
         Primitive(id="a", type="bbox", label="x", box=(100, 200, 500, 460))],
-        relations=[], width=800, height=600)
+        relations=[])
     vision._normalize_coords(s)
     assert _approx(s.by_id("a").box[:2], (0.1, 0.2))
 
@@ -126,6 +128,15 @@ def test_normalize_pixel_scale():
         relations=[], width=2000, height=1200)
     vision._normalize_coords(s)
     assert _approx(s.by_id("a").point, (0.75, 1000 / 1200))
+
+
+def test_normalize_small_pixel_bbox_uses_image_size():
+    """像素坐标即使小于 1000,也应优先按图片宽高归一化。"""
+    s = Scene(summary="t", primitives=[
+        Primitive(id="a", type="bbox", label="x", box=(100, 200, 500, 460))],
+        relations=[], width=800, height=600)
+    vision._normalize_coords(s)
+    assert _approx(s.by_id("a").box[:2], (100 / 800, 200 / 600))
 
 
 # ---- vision: 缓存 + 端到端解析(打桩 HTTP,全程离线)----------------------
@@ -142,6 +153,14 @@ class _FakeResp:
 
     def json(self):
         return {"choices": [{"message": {"content": self._content}}]}
+
+
+class _FakeGetResp:
+    def __init__(self, content):
+        self.content = content
+
+    def raise_for_status(self):
+        pass
 
 
 def _patch_api(monkey, content, counter):
@@ -230,8 +249,8 @@ def test_describe_structured_end_to_end():
         assert scene.summary == "s"
         p = scene.by_id("a")
         assert p is not None and p.type == "bbox"
-        # 输入坐标最大 500(≤1000)→ 按 0~1000 标度归一化(各除以 1000)
-        assert _approx(p.box[:2], (0.1, 0.2)), p.box
+        # 输入坐标是 800x600 原图像素,应按图像宽高归一化
+        assert _approx(p.box[:2], (100 / 800, 200 / 600)), p.box
         assert counter[0] == 1, f"应只调 1 次 API,实际 {counter[0]}"
     finally:
         mk.undo()
@@ -307,6 +326,61 @@ def test_cache_stats_and_clear():
         removed = vision.cache_clear()
         assert removed == 2
         assert vision.cache_stats()["entries"] == 0
+    finally:
+        mk.undo()
+
+
+def test_to_data_uri_downloads_http_url():
+    """README 承诺支持图片 URL,应下载后转成 data URI。"""
+    mk = _Monkey()
+    counter = [0]
+    payload = _tiny_png_bytes(20, 10)
+
+    def fake_get(url, timeout=None):
+        counter[0] += 1
+        assert url == "https://example.test/image.png"
+        assert timeout is not None
+        return _FakeGetResp(payload)
+
+    try:
+        mk.set(vision.requests, "get", fake_get)
+        data_uri, w, h = vision._to_data_uri("https://example.test/image.png", 1024)
+        assert data_uri.startswith("data:image/png;base64,")
+        assert (w, h) == (20, 10)
+        assert counter[0] == 1
+    finally:
+        mk.undo()
+
+
+def test_verify_load_image_accepts_data_uri():
+    """verify/refine 这类二阶段能力也应复用主解析支持的图片输入。"""
+    import base64
+
+    payload = _tiny_png_bytes(12, 8)
+    data_uri = "data:image/png;base64," + base64.b64encode(payload).decode()
+    img = verify._load_image(data_uri)
+    assert img.size == (12, 8)
+
+
+def test_refine_region_accepts_data_uri():
+    """局部细化应和主解析一样接受 data URI 输入。"""
+    import base64
+
+    mk = _Monkey()
+    payload = _tiny_png_bytes(12, 8)
+    data_uri = "data:image/png;base64," + base64.b64encode(payload).decode()
+    prim = Primitive(
+        id="panel",
+        type="bbox",
+        label="面板",
+        box=(0.0, 0.0, 1.0, 1.0),
+    )
+    try:
+        mk.set(refine, "_load_prompt", lambda name: _FAKE_PROMPT)
+        mk.set(refine, "_call_api", lambda cfg, prompt, uri, question="": _FAKE_JSON)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = refine.refine_region(data_uri, prim, cfg=cfg)
+        assert scene.meta["refined_from"] == "panel"
     finally:
         mk.undo()
 
@@ -395,6 +469,82 @@ def test_sort_reading_order_unlocated_sink_to_end():
     assert ordered == ["real", "ghost"]
 
 
+# ---- config: 配置优先级与占位校验 ----------------------------------------
+
+def test_config_project_file_overrides_global_file():
+    import json
+    import tempfile
+    from deepvision import config as config_module
+
+    mk = _Monkey()
+    tmp = Path(tempfile.mkdtemp())
+    global_cfg = tmp / "home.json"
+    project_cfg = tmp / ".deepvision.json"
+    global_cfg.write_text(json.dumps({
+        "api_key": "global-key",
+        "base_url": "https://global.example/v1",
+        "model": "global-model",
+        "temperature": 0.9,
+    }), encoding="utf-8")
+    project_cfg.write_text(json.dumps({
+        "base_url": "https://project.example/v1",
+        "model": "project-model",
+    }), encoding="utf-8")
+
+    try:
+        mk.set(config_module, "CONFIG_PATHS", [global_cfg, project_cfg])
+        cfg = Config.load()
+        assert cfg.api_key == "global-key"
+        assert cfg.base_url == "https://project.example/v1"
+        assert cfg.model == "project-model"
+        assert cfg.temperature == 0.9
+    finally:
+        mk.undo()
+
+
+def test_config_openai_env_replaces_placeholder_key():
+    import json
+    import os
+    import tempfile
+    from deepvision import config as config_module
+
+    mk = _Monkey()
+    tmp = Path(tempfile.mkdtemp())
+    cfg_file = tmp / "config.json"
+    cfg_file.write_text(json.dumps({
+        "api_key": "在这里填你的 API key",
+        "base_url": "https://api.example/v1",
+        "model": "vision-model",
+    }), encoding="utf-8")
+    old_openai_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "env-openai-key"
+
+    try:
+        mk.set(config_module, "CONFIG_PATHS", [cfg_file])
+        cfg = Config.load()
+        assert cfg.api_key == "env-openai-key"
+    finally:
+        if old_openai_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = old_openai_key
+        mk.undo()
+
+
+def test_config_placeholder_api_key_is_not_ready():
+    cfg = Config(
+        api_key="在这里填你的 API key",
+        base_url="https://api.example/v1",
+        model="vision-model",
+    )
+    try:
+        cfg.require_ready()
+    except RuntimeError as e:
+        assert "api_key" in str(e)
+        return
+    raise AssertionError("占位 api_key 不应通过配置就绪校验")
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -409,8 +559,3 @@ if __name__ == "__main__":
                 failed += 1
                 print(f"ERROR {name}: {type(e).__name__}: {e}")
     sys.exit(1 if failed else 0)
-
-
-
-
-

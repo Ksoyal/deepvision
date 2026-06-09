@@ -18,16 +18,21 @@ from PIL import Image
 
 from .config import Config
 from .schema import Scene, Primitive
-from .vision import _to_data_uri, _call_api, _extract_json, _load_prompt
+from .vision import (
+    _to_data_uri,
+    _call_api,
+    _extract_json,
+    _load_prompt,
+    _load_image as _load_any_image,
+)
 from .refine import _crop_bbox
 
 
 def _load_image(image: Union[str, Path, bytes]) -> Image.Image:
-    if isinstance(image, (str, Path)) and Path(image).is_file():
-        return Image.open(image).convert("RGB")
-    if isinstance(image, bytes):
-        return Image.open(io.BytesIO(image)).convert("RGB")
-    raise ValueError("verify 需要文件路径或 bytes 输入")
+    try:
+        return _load_any_image(image)
+    except ValueError as e:
+        raise ValueError("verify 需要文件路径、URL、bytes 或 data URI 输入") from e
 
 
 def observe_region(img: Image.Image, p: Primitive,

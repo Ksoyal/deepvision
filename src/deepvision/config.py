@@ -1,6 +1,6 @@
 """配置管理。
 
-优先级:显式传参 > 环境变量 > 配置文件(~/.deepvision/config.json)。
+优先级:显式传参 > 环境变量 > 项目配置(./.deepvision.json) > 全局配置(~/.deepvision/config.json)。
 兼容 OpenAI 风格的多模态接口(base_url + api_key + model)。
 """
 
@@ -17,6 +17,12 @@ CONFIG_PATHS = [
     Path.home() / ".deepvision" / "config.json",
     Path.cwd() / ".deepvision.json",
 ]
+
+PLACEHOLDERS = {
+    "api_key": {"在这里填你的 API key", "<key>", "<api_key>", "sk-xxx"},
+    "base_url": {"<端点>", "<base_url>"},
+    "model": {"<模型id>", "<model>"},
+}
 
 
 @dataclass
@@ -40,7 +46,6 @@ class Config:
                     data.update(json.loads(p.read_text(encoding="utf-8")))
                 except (json.JSONDecodeError, OSError):
                     pass
-                break
 
         env_map = {
             "api_key": "DEEPVISION_API_KEY",
@@ -52,8 +57,10 @@ class Config:
             if val:
                 data[field_name] = val
 
-        # OpenAI 标准变量兜底
-        data.setdefault("api_key", os.environ.get("OPENAI_API_KEY", ""))
+        # OpenAI 标准变量兜底:只在 api_key 为空或仍是模板占位时生效
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key and cls._is_missing("api_key", data.get("api_key")):
+            data["api_key"] = openai_key
 
         # 显式 overrides 最高优先级
         for k, v in overrides.items():
@@ -63,10 +70,19 @@ class Config:
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 
+    @staticmethod
+    def _is_missing(name: str, value: object) -> bool:
+        if value is None:
+            return True
+        text = str(value).strip()
+        if not text:
+            return True
+        return text in PLACEHOLDERS.get(name, set())
+
     def require_ready(self) -> None:
         """请求前校验必填项均已配置,缺失则明确报错(不偷偷使用默认端点)。"""
         missing = [name for name in ("api_key", "base_url", "model")
-                   if not getattr(self, name)]
+                   if self._is_missing(name, getattr(self, name))]
         if missing:
             raise RuntimeError(
                 f"配置缺失:{', '.join(missing)}。"
