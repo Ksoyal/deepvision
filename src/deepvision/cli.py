@@ -185,7 +185,12 @@ def cmd_cache(argv) -> int:
 
 def _process_one(image, args, cfg):
     """处理单张图,返回 scene。"""
-    scene = describe_structured(image, cfg, detail=getattr(args, "detail", "standard"))
+    scene = describe_structured(
+        image,
+        cfg,
+        detail=getattr(args, "detail", "standard"),
+        intent=getattr(args, "intent", "general"),
+    )
     if args.verify:
         scene = verify_scene(image, scene, level=args.verify, cfg=cfg)
     if args.refine:
@@ -214,6 +219,9 @@ def main(argv=None) -> int:
     ap.add_argument("--detail", default="standard",
                     choices=["brief", "standard", "fine"],
                     help="输出粒度:brief=低噪声概览,standard=默认结构化,fine=精细 OCR/坐标")
+    ap.add_argument("--intent", default="general",
+                    choices=["general", "count", "ocr", "locate", "inspect"],
+                    help="任务意图:general=通用解析,count=计数,ocr=转写,locate=定位,inspect=复核/找异常")
     ap.add_argument("-m", "--model", help="覆盖模型 id")
     ap.add_argument("-t", "--temperature", type=float, help="采样温度")
     ap.add_argument("-s", "--max-edge", type=int, dest="max_edge", help="长边像素上限")

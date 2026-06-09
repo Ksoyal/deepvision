@@ -347,6 +347,35 @@ def test_describe_structured_uses_detail_prompt():
     assert "精细 OCR" in prompts[0]
 
 
+def test_describe_structured_count_intent_uses_fine_count_prompt():
+    """count intent 应表达计数任务,并自动提升到 fine 级解析。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(_tiny_png_bytes(20, 10), cfg, intent="count")
+        assert scene.meta["detail"] == "fine"
+        assert scene.meta["intent"] == "count"
+    finally:
+        mk.undo()
+
+    assert len(prompts) == 1
+    assert "detail=fine" in prompts[0]
+    assert "intent=count" in prompts[0]
+    assert "逐个枚举" in prompts[0]
+    assert "不要用常识默认数量" in prompts[0]
+
+
 def test_describe_structured_rejects_unknown_detail():
     cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
     try:
@@ -355,6 +384,16 @@ def test_describe_structured_rejects_unknown_detail():
         assert "detail" in str(e)
         return
     raise AssertionError("未知 detail 不应继续调用视觉模型")
+
+
+def test_describe_structured_rejects_unknown_intent():
+    cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+    try:
+        vision.describe_structured(_tiny_png_bytes(10, 10), cfg, intent="measure")
+    except ValueError as e:
+        assert "intent" in str(e)
+        return
+    raise AssertionError("未知 intent 不应继续调用视觉模型")
 
 
 def test_structured_rerun_hits_cache():
@@ -521,13 +560,36 @@ def test_cli_process_one_passes_detail_to_structured_parser():
     mk = _Monkey()
     try:
         mk.set(cli, "describe_structured",
-               lambda image, cfg, detail="standard": seen.append(detail) or Scene(summary="ok"))
+               lambda image, cfg, detail="standard", intent="general": seen.append(detail) or Scene(summary="ok"))
         scene = cli._process_one(b"img", Args(), Config(api_key="k", base_url="http://x", model="m"))
     finally:
         mk.undo()
 
     assert scene.summary == "ok"
     assert seen == ["fine"]
+
+
+def test_cli_process_one_passes_intent_to_structured_parser():
+    class Args:
+        detail = "standard"
+        intent = "count"
+        verify = None
+        refine = False
+
+    seen = []
+    mk = _Monkey()
+    try:
+        def fake_describe(image, cfg, detail="standard", intent="general"):
+            seen.append((detail, intent))
+            return Scene(summary="ok")
+
+        mk.set(cli, "describe_structured", fake_describe)
+        scene = cli._process_one(b"img", Args(), Config(api_key="k", base_url="http://x", model="m"))
+    finally:
+        mk.undo()
+
+    assert scene.summary == "ok"
+    assert seen == [("standard", "count")]
 
 
 def test_grab_clipboard_uses_windows_fallback_when_pillow_misses_bitmap():

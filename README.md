@@ -107,21 +107,31 @@ deepvision *.png --json            # JSON 数组,每项含 source(来源)和 sce
 # 覆盖参数
 deepvision 图.png -m google/gemma-4-31b-it:free   # 临时换模型
 deepvision 图.png -t 0.2 -s 1280                   # 温度 / 长边像素上限
-deepvision 图.png --detail fine                    # 精细 OCR / 坐标 / 逐格提取
+deepvision 图.png --intent count                   # 精确计数
+deepvision 图.png --intent ocr                     # 精确转写 / OCR
+deepvision 图.png --detail fine                    # 高级控制:精细输出粒度
 deepvision 图.png --no-cache                       # 禁用缓存,强制重新请求
 ```
 
 `deepvision -c` 会先使用标准剪贴板读取；Windows 上遇到 Pillow 无法读取的位图剪贴板格式时，会自动用 STA 剪贴板 fallback 在内存中转成 PNG，不需要接入工具自行保存临时文件。
 
-`--detail` 控制输出粒度,默认是 `standard`:
+`--intent` 是推荐入口,用于告诉 DeepVision 当前任务类型:
+
+- `general`: 默认通用解析。
+- `count`: 精确计数,逐个枚举可见实例,避免被常识默认数量带偏。
+- `ocr`: 精确转写文字、代码、表格文本。
+- `locate`: 精确定位,用于回答位置、方向、第几个、靠近什么。
+- `inspect`: 仔细复核、找异常、找差异或检查不一致。
+
+`--detail` 是高级粒度控制,默认是 `standard`:
 
 - `brief`: 低噪声概览,只保留主要对象、区域和关键文本。
 - `standard`: 默认模式,输出语义结构和必要视觉基元,不拆单字符或单 token。
-- `fine`: 精细 OCR / 精确结构化,用于逐字识别、表格逐格提取、代码截图转写、坐标定位或校对。
+- `fine`: 精细 OCR / 精确结构化。非 `general` 的 `--intent` 会自动使用 fine 级约束。
 
 ### 响应缓存
 
-默认缓存模型响应到 `~/.deepvision/cache/`,同图同请求不重复调用 API,省额度也更快。缓存键由模型 + 提示词 + 图片内容决定；不同 `--detail` 会使用不同提示词,因此 `standard` 和 `fine` 不会互相复用旧结果。结构化解析是问题无关的客观全量表示,所以同一张图在相同模型、相同 prompt 下只会解析一次,后续直接复用。
+默认缓存模型响应到 `~/.deepvision/cache/`,同图同请求不重复调用 API,省额度也更快。缓存键由模型 + 提示词 + 图片内容决定；不同 `--detail` 或 `--intent` 会使用不同提示词,因此 `standard`、`fine`、`count` 等模式不会互相复用旧结果。结构化解析默认是问题无关的客观全量表示,所以同一张图在相同模型、相同 prompt 下只会解析一次,后续直接复用。
 
 缓存目录不会无限增长:条目数超过 `cache_max_entries`(默认 1000,设 0 不限)时,按最近最少使用自动淘汰最旧的。也可手动管理:
 
@@ -153,7 +163,8 @@ from deepvision import describe_structured, Config
 
 cfg = Config.load()                       # 读全局/项目配置与环境变量
 scene = describe_structured("图.png", cfg=cfg)
-scene = describe_structured("图.png", cfg=cfg, detail="fine")  # 可选:brief/standard/fine
+scene = describe_structured("图.png", cfg=cfg, intent="count")  # 可选:general/count/ocr/locate/inspect
+scene = describe_structured("图.png", cfg=cfg, detail="fine")   # 高级控制:brief/standard/fine
 
 print(scene.to_anchored_text())           # 给下游文本模型的锚点文本
 print(scene.to_json())                    # 结构化 JSON

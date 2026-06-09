@@ -28,6 +28,7 @@ _PROMPT_DIR = Path(__file__).parent / "prompts"
 _CACHE_DIR = Path.home() / ".deepvision" / "cache"
 _IMAGE_FETCH_TIMEOUT = 30
 _DETAIL_MODES = {"brief", "standard", "fine"}
+_INTENT_MODES = {"general", "count", "ocr", "locate", "inspect"}
 _DETAIL_PROMPT_ADDENDA = {
     "brief": """
 # 输出粒度(detail=brief)
@@ -54,6 +55,34 @@ _DETAIL_PROMPT_ADDENDA = {
 - 仍然必须优先提供 composites,让下游先读整体结构再读细节。
 - 每个细粒度 primitive 必须有稳定 id、坐标、text,并用 parent 指向最近的 composite。
 - children 只引用真实输出的 id;不要输出无意义背景或装饰碎片。
+""",
+}
+_INTENT_PROMPT_ADDENDA = {
+    "count": """
+# 任务意图(intent=count)
+
+目标是精确计数。对用户可能关心的重复对象、标记点、独立实例逐个枚举,
+再给出总数。不要用常识默认数量替代图像证据,尤其要注意多出、缺失、重叠或异常的可见实例。
+如果存在黄色点、圈注、编号或其他视觉标记,优先把这些标记作为计数线索,并说明每个实例的位置。
+遮挡或不确定的实例要标低 confidence 或说明不确定,不要强行并入常规数量。
+""",
+    "ocr": """
+# 任务意图(intent=ocr)
+
+目标是精确转写可读文字。保持自然阅读顺序,尽量完整保留文字、数字、符号、换行、
+表格单元格文本和代码片段。对不确定字符标低 confidence,不要按语义补写看不清的内容。
+""",
+    "locate": """
+# 任务意图(intent=locate)
+
+目标是精确定位。优先输出可被引用的 bbox/point、稳定 id、parent 和必要空间关系,
+使下游可以回答在哪里、左/右/上/下、第几个、靠近什么等问题。
+""",
+    "inspect": """
+# 任务意图(intent=inspect)
+
+目标是仔细检查、复核或发现异常。逐项列出可疑、不一致、额外、缺失、遮挡或与常识不同的视觉证据。
+不要用常识覆盖图像中的异常现象;不确定时明确标注不确定。
 """,
 }
 
@@ -215,14 +244,38 @@ def _normalize_detail(detail: Optional[str]) -> str:
     return value
 
 
-def _prompt_for_detail(detail: Optional[str]) -> str:
+def _normalize_intent(intent: Optional[str]) -> str:
+    value = (intent or "general").strip().lower()
+    if value not in _INTENT_MODES:
+        allowed = ", ".join(sorted(_INTENT_MODES))
+        raise ValueError(f"intent 必须是以下之一: {allowed}")
+    return value
+
+
+def _detail_for_intent(detail: Optional[str], intent: Optional[str]) -> str:
     value = _normalize_detail(detail)
-    return (
+    intent_value = _normalize_intent(intent)
+    if intent_value != "general":
+        return "fine"
+    return value
+
+
+def _prompt_for_detail(detail: Optional[str]) -> str:
+    return _prompt_for_options(detail, "general")
+
+
+def _prompt_for_options(detail: Optional[str], intent: Optional[str]) -> str:
+    intent_value = _normalize_intent(intent)
+    detail_value = _detail_for_intent(detail, intent_value)
+    prompt = (
         _load_prompt("structured.md").rstrip()
         + "\n\n"
-        + _DETAIL_PROMPT_ADDENDA[value].strip()
+        + _DETAIL_PROMPT_ADDENDA[detail_value].strip()
         + "\n"
     )
+    if intent_value != "general":
+        prompt += "\n" + _INTENT_PROMPT_ADDENDA[intent_value].strip() + "\n"
+    return prompt
 
 
 def _is_http_url(value: str) -> bool:
@@ -395,23 +448,24 @@ def _extract_json(text: str) -> dict:
 
 def describe_structured(image: Union[str, Path, bytes],
                         cfg: Optional[Config] = None,
-                        detail: str = "standard") -> Scene:
+                        detail: str = "standard",
+                        intent: str = "general") -> Scene:
     """核心接口:把图片解析成带坐标锚点的结构化 Scene。
 
-    产出的是客观全量解析:同一张图无论下游想问什么,都引用这同一份
-    结构化表示(回答交给下游文本模型)。因此不向视觉模型传任何问题——
-    既保证解析不被问题带偏,也让缓存能跨问题复用(同图同模型同 prompt
-    即命中)。
+    默认产出客观全量解析,不传用户问题;intent 只传递任务类型,
+    用于选择计数、OCR、定位或复核这类更严格的解析约束。
     """
     cfg = cfg or Config.load()
-    detail = _normalize_detail(detail)
+    intent = _normalize_intent(intent)
+    detail = _detail_for_intent(detail, intent)
     data_uri, w, h = _to_data_uri(image, cfg.max_edge)
-    prompt = _prompt_for_detail(detail)
+    prompt = _prompt_for_options(detail, intent)
     raw = _call_api(cfg, prompt, data_uri)
     data = _extract_json(raw)
     scene = Scene.from_dict(data)
     scene.width, scene.height = w, h
     scene.meta["detail"] = detail
+    scene.meta["intent"] = intent
     scene = _normalize_coords(scene)
     # 坐标就绪后:按阅读顺序聚簇,并用坐标补齐几何关系(模型只给语义关系)。
     scene.primitives = sort_reading_order(scene.primitives)
