@@ -6,7 +6,13 @@
 """
 
 from .config import Config
-from .schema import Scene, Primitive, Relation
+from .schema import (
+    Scene,
+    Primitive,
+    Relation,
+    derive_geometric_relations,
+    sort_reading_order,
+)
 from .vision import describe_structured
 
 __all__ = [
@@ -14,6 +20,8 @@ __all__ = [
     "Scene",
     "Primitive",
     "Relation",
+    "derive_geometric_relations",
+    "sort_reading_order",
     "describe_structured",
 ]
 

@@ -20,7 +20,7 @@ import requests
 from PIL import Image
 
 from .config import Config
-from .schema import Scene
+from .schema import Scene, derive_geometric_relations, sort_reading_order
 
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -309,4 +309,8 @@ def describe_structured(image: Union[str, Path, bytes],
     data = _extract_json(raw)
     scene = Scene.from_dict(data)
     scene.width, scene.height = w, h
-    return _normalize_coords(scene)
+    scene = _normalize_coords(scene)
+    # 坐标就绪后:按阅读顺序聚簇,并用坐标补齐几何关系(模型只给语义关系)。
+    scene.primitives = sort_reading_order(scene.primitives)
+    scene.relations = scene.relations + derive_geometric_relations(scene.primitives)
+    return scene

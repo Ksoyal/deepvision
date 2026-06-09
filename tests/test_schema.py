@@ -12,7 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from deepvision.schema import Scene, Primitive, Relation
+from deepvision.schema import (
+    Scene, Primitive, Relation,
+    derive_geometric_relations, sort_reading_order,
+)
 from deepvision import vision
 from deepvision.config import Config
 
@@ -314,6 +317,82 @@ def _tiny_png_bytes(w, h):
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (255, 255, 255)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+# ---- schema: 几何关系推导(纯坐标,无需 API)------------------------------
+
+def _rels_set(rels):
+    return {(r.subj, r.rel, r.obj) for r in rels}
+
+
+def test_derive_contains_minimal_parent():
+    """contains 只连最小直接容器,不产生传递闭包。"""
+    prims = [
+        Primitive(id="panel", type="bbox", label="面板", box=(0.0, 0.0, 1.0, 1.0)),
+        Primitive(id="card", type="bbox", label="卡片", box=(0.1, 0.1, 0.5, 0.5)),
+        Primitive(id="icon", type="bbox", label="图标", box=(0.15, 0.15, 0.2, 0.2)),
+    ]
+    rels = _rels_set(derive_geometric_relations(prims))
+    assert ("card", "contains", "icon") in rels
+    assert ("panel", "contains", "card") in rels
+    # icon 的直接容器是 card,不应再由 panel 直接 contains
+    assert ("panel", "contains", "icon") not in rels
+
+
+def test_derive_left_of_nearest_in_row():
+    """同一行内只连水平最近邻,不连跨过中间元素的远邻。"""
+    prims = [
+        Primitive(id="a", type="bbox", label="a", box=(0.0, 0.4, 0.1, 0.5)),
+        Primitive(id="b", type="bbox", label="b", box=(0.2, 0.4, 0.3, 0.5)),
+        Primitive(id="c", type="bbox", label="c", box=(0.4, 0.4, 0.5, 0.5)),
+    ]
+    rels = _rels_set(derive_geometric_relations(prims))
+    assert ("a", "left_of", "b") in rels
+    assert ("b", "left_of", "c") in rels
+    assert ("a", "left_of", "c") not in rels  # 跨过 b 的远邻不连
+
+
+def test_derive_above_requires_horizontal_overlap():
+    """垂直方向只在水平投影重叠时成立;错位的列不连。"""
+    prims = [
+        Primitive(id="top", type="bbox", label="上", box=(0.1, 0.0, 0.3, 0.1)),
+        Primitive(id="bottom", type="bbox", label="下", box=(0.1, 0.5, 0.3, 0.6)),
+        Primitive(id="side", type="bbox", label="旁", box=(0.7, 0.0, 0.9, 0.1)),
+    ]
+    rels = _rels_set(derive_geometric_relations(prims))
+    assert ("top", "above", "bottom") in rels
+    assert ("top", "above", "side") not in rels  # 水平不重叠
+
+
+def test_derive_point_not_a_container():
+    """退化成点的基元没有面积,不该当容器。"""
+    prims = [
+        Primitive(id="pt", type="point", label="点", point=(0.5, 0.5)),
+        Primitive(id="box", type="bbox", label="框", box=(0.4, 0.4, 0.6, 0.6)),
+    ]
+    rels = derive_geometric_relations(prims)
+    assert not any(r.subj == "pt" and r.rel == "contains" for r in rels)
+
+
+# ---- schema: 阅读顺序排序 --------------------------------------------------
+
+def test_sort_reading_order_rows_then_cols():
+    prims = [
+        Primitive(id="r2c1", type="bbox", label="", box=(0.0, 0.8, 0.1, 0.9)),
+        Primitive(id="r1c2", type="bbox", label="", box=(0.5, 0.1, 0.6, 0.2)),
+        Primitive(id="r1c1", type="bbox", label="", box=(0.0, 0.1, 0.1, 0.2)),
+    ]
+    ordered = [p.id for p in sort_reading_order(prims)]
+    assert ordered == ["r1c1", "r1c2", "r2c1"]
+
+
+def test_sort_reading_order_unlocated_sink_to_end():
+    prims = [
+        Primitive(id="ghost", type="bbox", label=""),  # 无坐标
+        Primitive(id="real", type="bbox", label="", box=(0.0, 0.1, 0.1, 0.2)),
+    ]
+    ordered = [p.id for p in sort_reading_order(prims)]
+    assert ordered == ["real", "ghost"]
 
 
 if __name__ == "__main__":
