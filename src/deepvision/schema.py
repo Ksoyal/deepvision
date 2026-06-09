@@ -215,6 +215,29 @@ def _same_parent(a: Primitive, b: Primitive) -> bool:
     return a.parent == b.parent
 
 
+def _is_formula_part(p: Primitive) -> bool:
+    return p.role == "formula_part"
+
+
+def _is_horizontal_rule(p: Primitive) -> bool:
+    r = _rect_of(p)
+    if r is None:
+        return False
+    x0, y0, x1, y1 = r
+    w, h = x1 - x0, y1 - y0
+    return w > 0 and h > 0 and h <= 0.02 and (w / h) >= 8
+
+
+def _keep_direction_relation(subj: Primitive, rel: str, obj: Primitive) -> bool:
+    if not (_is_formula_part(subj) and _is_formula_part(obj)):
+        return True
+    if rel == "left_of":
+        return False
+    if rel == "above":
+        return _is_horizontal_rule(subj) or _is_horizontal_rule(obj)
+    return True
+
+
 def derive_geometric_relations(primitives: List[Primitive],
                                align_tol: float = 0.02) -> List[Relation]:
     """从坐标推导一组**有界**的几何关系,并限制在同一父容器内。
@@ -271,7 +294,8 @@ def derive_geometric_relations(primitives: List[Primitive],
                 best_gap = gap
                 best_right = pj
         if best_right is not None:
-            relations.append(Relation(subj=pi.id, rel="left_of", obj=best_right.id))
+            if _keep_direction_relation(pi, "left_of", best_right):
+                relations.append(Relation(subj=pi.id, rel="left_of", obj=best_right.id))
 
     # 方向:垂直方向最近邻(above),只在水平投影有重叠时成立
     for pi, ri in rects:
@@ -291,7 +315,8 @@ def derive_geometric_relations(primitives: List[Primitive],
                 best_gap = gap
                 best_below = pj
         if best_below is not None:
-            relations.append(Relation(subj=pi.id, rel="above", obj=best_below.id))
+            if _keep_direction_relation(pi, "above", best_below):
+                relations.append(Relation(subj=pi.id, rel="above", obj=best_below.id))
 
     return relations
 

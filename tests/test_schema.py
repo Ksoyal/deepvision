@@ -549,6 +549,49 @@ def test_derive_geometric_relations_do_not_cross_parents():
     assert ("expr_10", "above", "expr_11") not in rels
 
 
+def test_derive_filters_low_value_formula_token_relations():
+    """公式 token 内部的水平顺序关系噪声应被过滤。"""
+    prims = [
+        Primitive(id="p_lim", type="bbox", label="极限符号",
+                  role="formula_part", parent="formula_1",
+                  box=(0.10, 0.10, 0.18, 0.18), text="lim"),
+        Primitive(id="p_lpar", type="bbox", label="左括号",
+                  role="formula_part", parent="formula_1",
+                  box=(0.20, 0.10, 0.22, 0.20), text="("),
+        Primitive(id="p_rpar", type="bbox", label="右括号",
+                  role="formula_part", parent="formula_1",
+                  box=(0.40, 0.10, 0.42, 0.20), text=")"),
+        Primitive(id="p_exp", type="bbox", label="指数",
+                  role="formula_part", parent="formula_1",
+                  box=(0.44, 0.08, 0.50, 0.14), text="n"),
+    ]
+
+    rels = _rels_set(derive_geometric_relations(prims))
+
+    assert not any(rel == "left_of" for _, rel, _ in rels)
+
+
+def test_derive_keeps_fraction_structure_relations():
+    """涉及分数线的垂直关系是结构信息,应保留。"""
+    prims = [
+        Primitive(id="num", type="bbox", label="分子",
+                  role="formula_part", parent="fraction_1",
+                  box=(0.30, 0.10, 0.50, 0.16), text="a+b"),
+        Primitive(id="bar", type="bbox", label="分数线",
+                  role="formula_part", parent="fraction_1",
+                  box=(0.30, 0.17, 0.50, 0.18)),
+        Primitive(id="den", type="bbox", label="分母",
+                  role="formula_part", parent="fraction_1",
+                  box=(0.30, 0.19, 0.50, 0.25), text="c+d"),
+    ]
+
+    rels = _rels_set(derive_geometric_relations(prims))
+
+    assert ("num", "above", "bar") in rels
+    assert ("bar", "above", "den") in rels
+    assert not any(rel == "left_of" for _, rel, _ in rels)
+
+
 def test_derive_point_not_a_container():
     """退化成点的基元没有面积,不该当容器。"""
     prims = [

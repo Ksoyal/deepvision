@@ -60,6 +60,11 @@
 aligned_with 这类几何关系——它们会由 bbox 坐标确定性地推导出来,你输出反而
 可能把方向标反。把坐标标准,几何关系自然就对了。
 
+公式、表达式、代码、短文本内部的 token 顺序应聚合到 composite 的 `text`
+和 `children` 中,不要用 token 级 `left_of` 关系表达。例如括号、lim、指数
+之间的左右顺序不需要 relations;分数、上下标等结构应通过 expression /
+formula_part composite 和子元素表达。
+
 # 语义聚合要求
 
 除了最小可定位的 primitives,还要输出 composites。composite 是由多个
