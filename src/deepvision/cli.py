@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from .config import Config
 from .vision import describe_structured
@@ -46,7 +47,7 @@ def _grab_clipboard_pillow():
     return ImageGrab.grabclipboard()
 
 
-def _grab_clipboard_windows() -> bytes | None:
+def _grab_clipboard_windows() -> Optional[bytes]:
     """Windows fallback: read bitmap clipboard in an STA PowerShell process.
 
     Pillow can return None for some Windows clipboard bitmap formats. The
@@ -184,7 +185,7 @@ def cmd_cache(argv) -> int:
 
 def _process_one(image, args, cfg):
     """处理单张图,返回 scene。"""
-    scene = describe_structured(image, cfg)
+    scene = describe_structured(image, cfg, detail=getattr(args, "detail", "standard"))
     if args.verify:
         scene = verify_scene(image, scene, level=args.verify, cfg=cfg)
     if args.refine:
@@ -210,6 +211,9 @@ def main(argv=None) -> int:
                     choices=["suspicious", "full"],
                     help="核查力度:不写=不核查;--verify=只查可疑(默认);"
                          "--verify full=全量逐个核查(最严格,免费档慢/易限流)")
+    ap.add_argument("--detail", default="standard",
+                    choices=["brief", "standard", "fine"],
+                    help="输出粒度:brief=低噪声概览,standard=默认结构化,fine=精细 OCR/坐标")
     ap.add_argument("-m", "--model", help="覆盖模型 id")
     ap.add_argument("-t", "--temperature", type=float, help="采样温度")
     ap.add_argument("-s", "--max-edge", type=int, dest="max_edge", help="长边像素上限")

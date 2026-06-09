@@ -27,6 +27,35 @@ from .schema import Scene, derive_geometric_relations, sort_reading_order
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 _CACHE_DIR = Path.home() / ".deepvision" / "cache"
 _IMAGE_FETCH_TIMEOUT = 30
+_DETAIL_MODES = {"brief", "standard", "fine"}
+_DETAIL_PROMPT_ADDENDA = {
+    "brief": """
+# 输出粒度(detail=brief)
+
+只输出低噪声概览:保留主要语义单元、主要对象/区域和关键可读文本。
+不要拆到单字符、单 token 或细碎装饰元素。适合用户只需要快速看懂图片内容。
+""",
+    "standard": """
+# 输出粒度(detail=standard)
+
+这是默认模式。目标是让没有视觉能力的文本模型看懂图片,同时控制上下文噪声。
+- 优先输出语义单元(composites)和少量必要视觉基元(primitives)。
+- 不要把普通文本、公式或代码拆成单字符/单 token 元素。
+- 公式保留到 expression、fraction、numerator、denominator、exponent、subscript 这类结构层级即可;完整内容写入 composite.text。
+- 不要仅为了拼出 OCR 文本而创建字符级 children;children 只引用真实输出的 id。
+- 表格可输出 table/row/cell 层级,cell.text 尽量完整;除非文字本身需要定位,不要拆 cell 内字符。
+""",
+    "fine": """
+# 输出粒度(detail=fine)
+
+精细 OCR / 精确结构化模式。用于用户明确要求逐字识别、校对、坐标定位、
+表格逐格提取、代码截图精确转写,或 standard 结果不足的场景。
+- 可以在必要时输出词级、字符级、代码 token 级或更细的 primitives。
+- 仍然必须优先提供 composites,让下游先读整体结构再读细节。
+- 每个细粒度 primitive 必须有稳定 id、坐标、text,并用 parent 指向最近的 composite。
+- children 只引用真实输出的 id;不要输出无意义背景或装饰碎片。
+""",
+}
 
 
 def _cache_key(model: str, prompt: str, data_uri: str, question: str) -> str:
@@ -176,6 +205,24 @@ def _normalize_coords(scene: Scene) -> Scene:
 
 def _load_prompt(name: str) -> str:
     return (_PROMPT_DIR / name).read_text(encoding="utf-8")
+
+
+def _normalize_detail(detail: Optional[str]) -> str:
+    value = (detail or "standard").strip().lower()
+    if value not in _DETAIL_MODES:
+        allowed = ", ".join(sorted(_DETAIL_MODES))
+        raise ValueError(f"detail 必须是以下之一: {allowed}")
+    return value
+
+
+def _prompt_for_detail(detail: Optional[str]) -> str:
+    value = _normalize_detail(detail)
+    return (
+        _load_prompt("structured.md").rstrip()
+        + "\n\n"
+        + _DETAIL_PROMPT_ADDENDA[value].strip()
+        + "\n"
+    )
 
 
 def _is_http_url(value: str) -> bool:
@@ -347,7 +394,8 @@ def _extract_json(text: str) -> dict:
 
 
 def describe_structured(image: Union[str, Path, bytes],
-                        cfg: Optional[Config] = None) -> Scene:
+                        cfg: Optional[Config] = None,
+                        detail: str = "standard") -> Scene:
     """核心接口:把图片解析成带坐标锚点的结构化 Scene。
 
     产出的是客观全量解析:同一张图无论下游想问什么,都引用这同一份
@@ -356,12 +404,14 @@ def describe_structured(image: Union[str, Path, bytes],
     即命中)。
     """
     cfg = cfg or Config.load()
+    detail = _normalize_detail(detail)
     data_uri, w, h = _to_data_uri(image, cfg.max_edge)
-    prompt = _load_prompt("structured.md")
+    prompt = _prompt_for_detail(detail)
     raw = _call_api(cfg, prompt, data_uri)
     data = _extract_json(raw)
     scene = Scene.from_dict(data)
     scene.width, scene.height = w, h
+    scene.meta["detail"] = detail
     scene = _normalize_coords(scene)
     # 坐标就绪后:按阅读顺序聚簇,并用坐标补齐几何关系(模型只给语义关系)。
     scene.primitives = sort_reading_order(scene.primitives)

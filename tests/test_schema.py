@@ -321,6 +321,42 @@ def test_describe_structured_end_to_end():
         mk.undo()
 
 
+def test_describe_structured_uses_detail_prompt():
+    """detail 应进入 prompt,从而让缓存和输出粒度可控。"""
+    import tempfile
+    mk = _Monkey()
+    prompts = []
+    tmp = Path(tempfile.mkdtemp()) / "cache"
+    try:
+        _isolated_cache(mk, tmp)
+        mk.set(vision, "_load_prompt", lambda name: _FAKE_PROMPT)
+
+        def fake_call(cfg, prompt, uri, question=""):
+            prompts.append(prompt)
+            return _FAKE_JSON
+
+        mk.set(vision, "_call_api", fake_call)
+        cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+        scene = vision.describe_structured(_tiny_png_bytes(20, 10), cfg, detail="fine")
+        assert scene.meta["detail"] == "fine"
+    finally:
+        mk.undo()
+
+    assert len(prompts) == 1
+    assert "detail=fine" in prompts[0]
+    assert "精细 OCR" in prompts[0]
+
+
+def test_describe_structured_rejects_unknown_detail():
+    cfg = Config(api_key="k", base_url="http://x", model="m", cache=False)
+    try:
+        vision.describe_structured(_tiny_png_bytes(10, 10), cfg, detail="dense")
+    except ValueError as e:
+        assert "detail" in str(e)
+        return
+    raise AssertionError("未知 detail 不应继续调用视觉模型")
+
+
 def test_structured_rerun_hits_cache():
     """structured 客观解析:同图重跑应命中缓存,不重复调用 API。"""
     import tempfile
@@ -473,6 +509,25 @@ def test_cli_clipboard_error_is_friendly():
     assert out.getvalue() == ""
     assert "错误[剪贴板]: 剪贴板里没有图片" in err.getvalue()
     assert "Traceback" not in err.getvalue()
+
+
+def test_cli_process_one_passes_detail_to_structured_parser():
+    class Args:
+        detail = "fine"
+        verify = None
+        refine = False
+
+    seen = []
+    mk = _Monkey()
+    try:
+        mk.set(cli, "describe_structured",
+               lambda image, cfg, detail="standard": seen.append(detail) or Scene(summary="ok"))
+        scene = cli._process_one(b"img", Args(), Config(api_key="k", base_url="http://x", model="m"))
+    finally:
+        mk.undo()
+
+    assert scene.summary == "ok"
+    assert seen == ["fine"]
 
 
 def test_grab_clipboard_uses_windows_fallback_when_pillow_misses_bitmap():
