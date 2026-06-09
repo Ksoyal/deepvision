@@ -475,6 +475,56 @@ def test_cli_clipboard_error_is_friendly():
     assert "Traceback" not in err.getvalue()
 
 
+def test_grab_clipboard_uses_windows_fallback_when_pillow_misses_bitmap():
+    payload = _tiny_png_bytes(10, 6)
+    mk = _Monkey()
+
+    try:
+        mk.set(cli, "_grab_clipboard_pillow", lambda: None)
+        mk.set(cli, "_grab_clipboard_windows", lambda: payload)
+        assert cli._grab_clipboard() == [("<剪贴板>", payload)]
+    finally:
+        mk.undo()
+
+
+def test_windows_clipboard_fallback_uses_sta_memory_stream():
+    import base64
+
+    payload = _tiny_png_bytes(9, 7)
+    calls = []
+
+    class Done:
+        returncode = 0
+        stdout = base64.b64encode(payload).decode() + "\n"
+        stderr = ""
+
+    def fake_run(cmd, capture_output=None, text=None, timeout=None, check=None):
+        calls.append({
+            "cmd": cmd,
+            "capture_output": capture_output,
+            "text": text,
+            "timeout": timeout,
+            "check": check,
+        })
+        return Done()
+
+    mk = _Monkey()
+    try:
+        mk.set(cli, "_is_windows", lambda: True)
+        mk.set(cli.subprocess, "run", fake_run)
+        assert cli._grab_clipboard_windows() == payload
+    finally:
+        mk.undo()
+
+    assert len(calls) == 1
+    cmd = calls[0]["cmd"]
+    assert "-STA" in cmd
+    script = cmd[-1]
+    assert "System.IO.MemoryStream" in script
+    assert "$env:TEMP" not in script
+    assert "clipboard_image" not in script
+
+
 def _tiny_png_bytes(w, h):
     import io
     from PIL import Image

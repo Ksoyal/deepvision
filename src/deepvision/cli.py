@@ -10,6 +10,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import io
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,24 +30,91 @@ def _read_input(src: str) -> "str | bytes":
     return src  # 文件路径或 URL/data URI 交给下游处理
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _image_to_png_bytes(img) -> bytes:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _grab_clipboard_pillow():
+    from PIL import ImageGrab
+
+    return ImageGrab.grabclipboard()
+
+
+def _grab_clipboard_windows() -> bytes | None:
+    """Windows fallback: read bitmap clipboard in an STA PowerShell process.
+
+    Pillow can return None for some Windows clipboard bitmap formats. The
+    fallback keeps the image in memory and returns PNG bytes without writing a
+    temp file.
+    """
+    if not _is_windows():
+        return None
+
+    script = r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Windows.Forms.Clipboard]::GetImage()
+if ($null -eq $img) {
+    exit 2
+}
+$stream = New-Object System.IO.MemoryStream
+try {
+    $img.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    [Convert]::ToBase64String($stream.ToArray())
+}
+finally {
+    $stream.Dispose()
+    $img.Dispose()
+}
+"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    data = next(
+        (line.strip() for line in reversed(completed.stdout.splitlines()) if line.strip()),
+        "",
+    )
+    if not data:
+        return None
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
 def _grab_clipboard():
     """抓取剪贴板内容,返回 (来源标签, 图片) 列表。
 
     剪贴板可能是:位图(返回单项)、或复制的图片文件(返回多项路径)。
     """
-    import io
-    from PIL import ImageGrab
-
-    obj = ImageGrab.grabclipboard()
+    obj = _grab_clipboard_pillow()
     if obj is None:
+        data = _grab_clipboard_windows()
+        if data is not None:
+            return [("<剪贴板>", data)]
         raise RuntimeError("剪贴板里没有图片")
     if isinstance(obj, list):
         if not obj:
             raise RuntimeError("剪贴板的文件列表为空")
         return [(str(p), str(p)) for p in obj]  # 路径交给下游按文件处理
-    buf = io.BytesIO()
-    obj.convert("RGB").save(buf, format="PNG")
-    return [("<剪贴板>", buf.getvalue())]
+    return [("<剪贴板>", _image_to_png_bytes(obj))]
 
 
 def cmd_init(argv) -> int:
