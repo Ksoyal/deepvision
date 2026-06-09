@@ -152,7 +152,11 @@ def main(argv=None) -> int:
     # 收集待处理图片为 (来源标签, 图片) 列表
     items = []
     if args.clipboard:
-        items = _grab_clipboard()
+        try:
+            items = _grab_clipboard()
+        except Exception as e:  # noqa: BLE001
+            print(f"错误[剪贴板]: {e}", file=sys.stderr)
+            return 1
     elif args.image:
         items = [(src, _read_input(src)) for src in args.image]
     else:

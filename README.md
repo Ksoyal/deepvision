@@ -60,6 +60,34 @@ pip uninstall deepvision
 rm -rf ~/.deepvision        # 删除配置(Windows: rmdir /s %USERPROFILE%\.deepvision)
 ```
 
+## 升级
+
+如果是从 GitHub clone 后用 `pip install -e .` 安装:
+
+```bash
+cd deepvision
+git pull
+pip install -e .
+```
+
+如需 MCP 依赖:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+如果是直接从 GitHub 安装:
+
+```bash
+pip install --upgrade --force-reinstall "git+https://github.com/Ksoyal/deepvision.git"
+```
+
+注意:Python 包升级不会自动更新已复制到工具目录的 skill。Claude Code 用户如安装了 `skills/deepvision/`,升级后请重新复制:
+
+```bash
+cp -r skills/deepvision ~/.claude/skills/
+```
+
 ## CLI 用法
 
 位置参数是图片路径(相对或绝对均可,也接受图片 URL);可一次传多个批量处理。下文 `图.png` 仅为示例路径。
@@ -227,5 +255,3 @@ python -m pytest -q                # 离线测试,不需要 API key
 ## License
 
 MIT
-
-

@@ -16,6 +16,7 @@ from deepvision.schema import (
     Scene, Primitive, Relation,
     derive_geometric_relations, sort_reading_order,
 )
+from deepvision import cli
 from deepvision import vision
 import deepvision.refine as refine
 import deepvision.verify as verify
@@ -383,6 +384,31 @@ def test_refine_region_accepts_data_uri():
         assert scene.meta["refined_from"] == "panel"
     finally:
         mk.undo()
+
+
+# ---- cli: 友好错误 ---------------------------------------------------------
+
+def test_cli_clipboard_error_is_friendly():
+    """剪贴板无图片时不应打印 traceback。"""
+    import contextlib
+    import io
+
+    mk = _Monkey()
+    out = io.StringIO()
+    err = io.StringIO()
+
+    try:
+        mk.set(cli, "_grab_clipboard",
+               lambda: (_ for _ in ()).throw(RuntimeError("剪贴板里没有图片")))
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["-c"])
+    finally:
+        mk.undo()
+
+    assert code == 1
+    assert out.getvalue() == ""
+    assert "错误[剪贴板]: 剪贴板里没有图片" in err.getvalue()
+    assert "Traceback" not in err.getvalue()
 
 
 def _tiny_png_bytes(w, h):
