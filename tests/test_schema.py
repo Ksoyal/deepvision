@@ -845,6 +845,84 @@ def test_windows_clipboard_fallback_uses_sta_memory_stream():
     assert "clipboard_image" not in script
 
 
+# ---- mcp: 工具参数 ---------------------------------------------------------
+
+def test_mcp_image_tool_passes_task_options():
+    mcp_server, registered, cleanup = _load_mcp_server_for_test()
+    seen = []
+    mk = _Monkey()
+
+    try:
+        mk.set(mcp_server.Config, "load",
+               staticmethod(lambda: Config(api_key="k", base_url="http://x", model="m")))
+
+        def fake_describe(image, cfg, detail="standard", intent="general", target=""):
+            seen.append((image, detail, intent, target))
+            return Scene(summary="ok")
+
+        mk.set(mcp_server, "describe_structured", fake_describe)
+        result = mcp_server.describe_image_structured(
+            "img.png",
+            detail="fine",
+            intent="count",
+            target="手指",
+        )
+    finally:
+        mk.undo()
+        cleanup()
+
+    assert "describe_image_structured" in registered
+    assert "describe_clipboard_image" in registered
+    assert seen == [("img.png", "fine", "count", "手指")]
+    assert "# 场景总览\nok" in result
+
+
+def test_mcp_clipboard_tool_uses_clipboard_and_task_options():
+    mcp_server, registered, cleanup = _load_mcp_server_for_test()
+    seen = []
+    payload = _tiny_png_bytes(12, 8)
+    mk = _Monkey()
+
+    try:
+        mk.set(mcp_server.Config, "load",
+               staticmethod(lambda: Config(api_key="k", base_url="http://x", model="m")))
+        mk.set(mcp_server, "_grab_clipboard", lambda: [("<剪贴板>", payload)])
+
+        def fake_describe(image, cfg, detail="standard", intent="general", target=""):
+            seen.append((image, detail, intent, target))
+            return Scene(summary="clipboard ok")
+
+        mk.set(mcp_server, "describe_structured", fake_describe)
+        result = mcp_server.describe_clipboard_image(
+            detail="fine",
+            intent="ocr",
+            target="公式",
+        )
+    finally:
+        mk.undo()
+        cleanup()
+
+    assert "describe_clipboard_image" in registered
+    assert seen == [(payload, "fine", "ocr", "公式")]
+    assert "# 场景总览\nclipboard ok" in result
+
+
+def test_mcp_clipboard_tool_returns_friendly_error():
+    mcp_server, registered, cleanup = _load_mcp_server_for_test()
+    mk = _Monkey()
+
+    try:
+        mk.set(mcp_server, "_grab_clipboard",
+               lambda: (_ for _ in ()).throw(RuntimeError("剪贴板里没有图片")))
+        result = mcp_server.describe_clipboard_image()
+    finally:
+        mk.undo()
+        cleanup()
+
+    assert "describe_clipboard_image" in registered
+    assert result == "错误[剪贴板]: 剪贴板里没有图片"
+
+
 def _tiny_png_bytes(w, h):
     import io
     from PIL import Image
@@ -869,6 +947,55 @@ def _colored_markers_png(n, color):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _load_mcp_server_for_test():
+    import importlib
+    import types
+
+    registered = {}
+
+    class FakeFastMCP:
+        def __init__(self, name):
+            self.name = name
+
+        def tool(self):
+            def deco(fn):
+                registered[fn.__name__] = fn
+                return fn
+            return deco
+
+        def run(self):
+            return None
+
+    old_modules = {name: sys.modules.get(name) for name in [
+        "deepvision.mcp_server",
+        "mcp",
+        "mcp.server",
+        "mcp.server.fastmcp",
+    ]}
+
+    mcp_mod = types.ModuleType("mcp")
+    server_mod = types.ModuleType("mcp.server")
+    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+    fastmcp_mod.FastMCP = FakeFastMCP
+    server_mod.fastmcp = fastmcp_mod
+    mcp_mod.server = server_mod
+    sys.modules["mcp"] = mcp_mod
+    sys.modules["mcp.server"] = server_mod
+    sys.modules["mcp.server.fastmcp"] = fastmcp_mod
+    sys.modules.pop("deepvision.mcp_server", None)
+
+    module = importlib.import_module("deepvision.mcp_server")
+
+    def cleanup():
+        for name, old in old_modules.items():
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
+
+    return module, registered, cleanup
 
 
 # ---- schema: 几何关系推导(纯坐标,无需 API)------------------------------

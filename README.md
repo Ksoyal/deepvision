@@ -234,7 +234,14 @@ pip install -e ".[mcp]"
 python -m deepvision.mcp_server
 ```
 
-它暴露 `describe_image_structured` 工具。在工具的 MCP 配置里(如 Claude Desktop 的 `claude_desktop_config.json`)添加:
+它暴露两个工具:
+
+- `describe_image_structured(path, detail="standard", intent="general", target="", refine=false)`: 解析明确路径图片。
+- `describe_clipboard_image(detail="standard", intent="general", target="", refine=false)`: 直接读取剪贴板图片,不需要 agent 自行保存临时文件。
+
+`detail`、`intent`、`target` 的含义与 CLI 一致。例如计数手指可用 `intent="count", target="手指"`;识别公式可用 `intent="ocr", target="公式"`。
+
+在工具的 MCP 配置里(如 Claude Desktop 的 `claude_desktop_config.json`)添加:
 
 ```json
 {
